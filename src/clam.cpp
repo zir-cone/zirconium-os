@@ -1,84 +1,57 @@
 // src/clam.cpp
 #include "clam.h"
 #include "fourty/ffs.h"
-#include "fourty/block_device.h"
-#include "ports.h"      // for io_wait if needed
+#include "console.h"
+#include "ports.h"
 #include <stdint.h>
 #include <stddef.h>
-#include "console.h"
 
-// ---- External console & keyboard hooks ----
-// Adjust these names if yours are different.
-
+// keyboard_get_last_char provided by keyboard.cpp
 char keyboard_get_last_char();
 
-// ---- Local utilities (no libc) ----
+// ------------ small libc-ish helpers ------------
 
 static size_t k_strlen(const char* s) {
     size_t n = 0;
-    while (s && s[n]) ++n;
+    if (!s) return 0;
+    while (s[n]) ++n;
     return n;
+}
+
+static int k_stricmp(const char* a, const char* b) {
+    // case-insensitive compare
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return (int)(unsigned char)ca - (int)(unsigned char)cb;
+        ++a; ++b;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+static bool k_streq_nocase(const char* a, const char* b) {
+    return k_stricmp(a, b) == 0;
 }
 
 static void k_strcpy(char* dst, const char* src) {
     if (!dst || !src) return;
-    size_t i = 0;
-    while (src[i]) {
-        dst[i] = src[i];
-        ++i;
+    while (*src) {
+        *dst++ = *src++;
     }
-    dst[i] = 0;
+    *dst = 0;
 }
 
-static void k_strcat(char* dst, const char* src, size_t dst_cap) {
-    if (!dst || !src || dst_cap == 0) return;
-    size_t dlen = k_strlen(dst);
-    size_t i = 0;
-    while (src[i] && dlen + i + 1 < dst_cap) {
-        dst[dlen + i] = src[i];
-        ++i;
-    }
-    dst[dlen + i] = 0;
-}
-
-static int k_strncmp(const char* a, const char* b, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        unsigned char ca = (unsigned char)a[i];
-        unsigned char cb = (unsigned char)b[i];
-        if (ca != cb) return (int)ca - (int)cb;
-        if (ca == 0) break;
-    }
-    return 0;
-}
-
-static bool k_streq(const char* a, const char* b) {
-    if (!a || !b) return false;
-    size_t i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return false;
-        ++i;
-    }
-    return a[i] == 0 && b[i] == 0;
-}
-
-static bool k_starts_with(const char* s, const char* prefix) {
-    if (!s || !prefix) return false;
-    size_t i = 0;
-    while (prefix[i]) {
-        if (s[i] != prefix[i]) return false;
-        ++i;
-    }
-    return true;
-}
-
-// ---- Clam state ----
+// ------------ Clam state ------------
 
 namespace clam {
 
 static uint32_t g_cwd_inode = 0;
 static char     g_cwd_path[256] = "/";
+static bool     g_ffs_ready = false;
 
-// ---- Low-level I/O helpers ----
+// ------------ console helpers ------------
 
 static void print(const char* s) {
     console_write(s);
@@ -89,8 +62,8 @@ static void println(const char* s) {
     console_write("\n");
 }
 
-// read a line from keyboard, echoing, into buf (null-terminated).
-// max_len includes terminator.
+// ------------ keyboard line input ------------
+
 static void read_line(char* buf, size_t max_len) {
     size_t len = 0;
     if (max_len == 0) return;
@@ -98,7 +71,7 @@ static void read_line(char* buf, size_t max_len) {
 
     while (1) {
         char c = 0;
-        // Sleep until we actually have a key
+        // block until we get a char
         while ((c = keyboard_get_last_char()) == 0) {
             asm volatile("hlt");
         }
@@ -111,11 +84,10 @@ static void read_line(char* buf, size_t max_len) {
         }
 
         // Backspace
-        if (c == '\b' || c == 0x7F) {
+        if (c == '\b' || (unsigned char)c == 0x7F) {
             if (len > 0) {
-                len--;
+                --len;
                 buf[len] = 0;
-                // erase from screen
                 console_write("\b \b");
             }
             continue;
@@ -133,14 +105,13 @@ static void read_line(char* buf, size_t max_len) {
     }
 }
 
-// ---- Path resolution ----
+// ------------ path resolution ------------
 
-// Resolve 'input' relative to current working directory into 'out'.
-// out_cap is its capacity. Returns false on overflow.
+// absolute if starting with '/', otherwise relative to g_cwd_path
 static bool resolve_path(const char* input, char* out, size_t out_cap) {
     if (!input || !out || out_cap == 0) return false;
 
-    // Absolute path
+    // Absolute
     if (input[0] == '/') {
         size_t len = k_strlen(input);
         if (len + 1 > out_cap) return false;
@@ -148,22 +119,17 @@ static bool resolve_path(const char* input, char* out, size_t out_cap) {
         return true;
     }
 
-    // Relative path
+    // Relative
     size_t cwd_len = k_strlen(g_cwd_path);
     size_t in_len  = k_strlen(input);
 
     bool root = (cwd_len == 1 && g_cwd_path[0] == '/');
-
-    // Pattern:
-    //   if cwd == "/", result = "/" + input
-    //   else result = cwd + "/" + input
     size_t need = (root ? 1 : cwd_len + 1) + in_len + 1;
     if (need > out_cap) return false;
 
     size_t pos = 0;
     if (root) {
-        out[0] = '/';
-        pos = 1;
+        out[pos++] = '/';
     } else {
         for (size_t i = 0; i < cwd_len; ++i) out[pos++] = g_cwd_path[i];
         out[pos++] = '/';
@@ -173,59 +139,16 @@ static bool resolve_path(const char* input, char* out, size_t out_cap) {
     return true;
 }
 
-// Dummy callback for dir-type checks
+// dummy callback used for dir check
 static void noop_dir_callback(const FFS_DirEntry&) {}
 
-// Check if an inode is a directory by trying list_dir
 static bool is_dir_inode(uint32_t inode) {
-    // If list_dir returns true but just doesn't call callback, it's a directory.
     return ffs::list_dir(inode, noop_dir_callback);
 }
 
-// ---- Command handlers ----
+// ------------ SAY command ------------
 
-static void cmd_help() {
-    println("Clamshell commands (v0):");
-    println("  SAY <text>               - print text");
-    println("  SAY --wd                 - print working directory");
-    println("  SAY --whats-inside <p>   - print contents of file");
-    println("  LDIR [path]              - list directory");
-    println("  CDIR <path>              - change directory");
-    println("  MAKE <name|dir/>         - create file or directory");
-    println("  REMOVE <path>            - remove file (v0: non-recursive)");
-    println("  CONCAT \"text\" TO file   - append text to file");
-    println("  CONCAT \"text\" AS file   - overwrite file with text");
-    println("  HELP                     - show this help");
-}
-
-// Basic $-string handling: for now, $"/$F" just treat escapes; ignore &x/&{}
-// (we can extend later)
-static void expand_basic_formatted(const char* src, char* dst, size_t dst_cap) {
-    // src points *after* the leading $", i.e. starting at first char within the quotes
-    // We'll process until closing " or end.
-    size_t d = 0;
-    size_t i = 0;
-    while (src[i] && src[i] != '"' && d + 1 < dst_cap) {
-        char c = src[i++];
-        if (c == '\\' && src[i]) {
-            char n = src[i++];
-            if (n == 'n') c = '\n';
-            else if (n == 't') c = '\t';
-            else if (n == '\\') c = '\\';
-            else if (n == '"') c = '"';
-            else {
-                // unknown escape, just output the character as-is
-                c = n;
-            }
-        }
-        dst[d++] = c;
-    }
-    dst[d] = 0;
-}
-
-// SAY command
 static void handle_SAY(const char* args) {
-    // skip spaces
     while (*args == ' ' || *args == '\t') ++args;
 
     if (*args == 0) {
@@ -233,20 +156,33 @@ static void handle_SAY(const char* args) {
         return;
     }
 
-    // Flags
-    if (k_streq(args, "--wd") || k_streq(args, "-wd") ||
-        k_streq(args, "--working-directory")) {
+    // SAY --wd
+    if (k_streq_nocase(args, "--wd") ||
+        k_streq_nocase(args, "-wd") ||
+        k_streq_nocase(args, "--working-directory")) {
         println(g_cwd_path);
         return;
     }
 
-    if (k_starts_with(args, "--whats-inside")) {
-        // form: SAY --whats-inside <path>
-        const char* p = args;
-        while (*p && *p != ' ') ++p;
+    // SAY --whats-inside path
+    const char* flag = "--whats-inside";
+    size_t flag_len = k_strlen(flag);
+    bool match_flag = true;
+    for (size_t i = 0; i < flag_len; ++i) {
+        char a = args[i];
+        char b = flag[i];
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (a != b) { match_flag = false; break; }
+    }
+    if (match_flag && (args[flag_len] == 0 || args[flag_len] == ' ' || args[flag_len] == '\t')) {
+        const char* p = args + flag_len;
         while (*p == ' ' || *p == '\t') ++p;
         if (*p == 0) {
             println("Error: SAY --whats-inside requires a path");
+            return;
+        }
+        if (!g_ffs_ready) {
+            println("Error: FFS not ready");
             return;
         }
         char resolved[256];
@@ -260,7 +196,6 @@ static void handle_SAY(const char* args) {
             return;
         }
 
-        // Read and print (limited) file contents
         char buf[256];
         uint64_t offset = 0;
         while (true) {
@@ -269,7 +204,6 @@ static void handle_SAY(const char* args) {
             buf[n] = 0;
             print(buf);
             offset += (uint64_t)n;
-            // safety: avoid spamming huge files endlessly (demo limitation)
             if (offset > 4096) {
                 println("\n[... truncated ...]");
                 break;
@@ -279,36 +213,55 @@ static void handle_SAY(const char* args) {
         return;
     }
 
-    // String literal or formatted string
-    if (args[0] == '"' || (args[0] == '$' && args[1] == '"')) {
-        char expanded[256];
-
-        if (args[0] == '"') {
-            // Plain string, just strip quotes, no escapes
-            const char* p = args + 1;
-            size_t d = 0;
-            while (*p && *p != '"' && d + 1 < sizeof(expanded)) {
-                expanded[d++] = *p++;
-            }
-            expanded[d] = 0;
-        } else {
-            // $"..."
-            const char* p = args + 2; // after $"
-            expand_basic_formatted(p, expanded, sizeof(expanded));
+    // simple string literal: SAY "text"
+    if (args[0] == '"' ) {
+        char out[256];
+        const char* p = args + 1;
+        size_t d = 0;
+        while (*p && *p != '"' && d + 1 < sizeof(out)) {
+            out[d++] = *p++;
         }
-
-        println(expanded);
+        out[d] = 0;
+        println(out);
         return;
     }
 
-    // Default: print args as-is
+    // $-strings (for now just treat like normal)
+    if (args[0] == '$' && args[1] == '"') {
+        char out[256];
+        const char* p = args + 2;
+        size_t d = 0;
+        while (*p && *p != '"' && d + 1 < sizeof(out)) {
+            char c = *p++;
+            if (c == '\\' && *p) {
+                char n = *p++;
+                if (n == 'n') c = '\n';
+                else if (n == 't') c = '\t';
+                else if (n == '\\') c = '\\';
+                else if (n == '"') c = '"';
+                else c = n;
+            }
+            out[d++] = c;
+        }
+        out[d] = 0;
+        println(out);
+        return;
+    }
+
+    // default: just echo
     println(args);
 }
 
-// LDIR
+// ------------ LDIR ------------
+
 static void handle_LDIR(const char* args) {
-    // Optional path argument
     while (*args == ' ' || *args == '\t') ++args;
+
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return;
+    }
+
     uint32_t inode = g_cwd_inode;
     char resolved[256];
 
@@ -324,7 +277,6 @@ static void handle_LDIR(const char* args) {
         }
     }
 
-    // Callback prints each entry
     auto cb = [](const FFS_DirEntry& e) {
         console_write(e.name);
         console_write("\n");
@@ -335,9 +287,16 @@ static void handle_LDIR(const char* args) {
     }
 }
 
-// CDIR
+// ------------ CDIR ------------
+
 static void handle_CDIR(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
+
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return;
+    }
+
     if (*args == 0) {
         println("Error: CDIR requires a path");
         return;
@@ -359,7 +318,6 @@ static void handle_CDIR(const char* args) {
     }
 
     g_cwd_inode = inode;
-    // Normalize path: we just use resolved as cwd_path
     k_strcpy(g_cwd_path, resolved);
     if (g_cwd_path[0] == 0) {
         g_cwd_path[0] = '/';
@@ -367,9 +325,14 @@ static void handle_CDIR(const char* args) {
     }
 }
 
-// MAKE
+// ------------ MAKE ------------
+
 static void handle_MAKE(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return;
+    }
     if (*args == 0) {
         println("Error: MAKE requires a name");
         return;
@@ -396,20 +359,22 @@ static void handle_MAKE(const char* args) {
     }
 
     bool ok = false;
-    if (is_dir) {
-        ok = ffs::create_dir(resolved);
-    } else {
-        ok = ffs::create_file(resolved);
-    }
+    if (is_dir) ok = ffs::create_dir(resolved);
+    else        ok = ffs::create_file(resolved);
 
     if (!ok) {
-        println("Error: MAKE failed (exists? invalid path?)");
+        println("Error: MAKE failed");
     }
 }
 
-// REMOVE (v0: only files or empty dirs)
+// ------------ REMOVE ------------
+
 static void handle_REMOVE(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return;
+    }
     if (*args == 0) {
         println("Error: REMOVE requires a path");
         return;
@@ -422,20 +387,23 @@ static void handle_REMOVE(const char* args) {
     }
 
     if (!ffs::remove_path(resolved)) {
-        println("Error: REMOVE failed (not implemented fully yet)");
+        println("Error: REMOVE failed");
     }
 }
 
-// CONCAT "text" TO file.txt  /  CONCAT "text" AS file.txt
+// ------------ CONCAT ------------
+
 static void handle_CONCAT(const char* args) {
-    // Expect: CONCAT "text" TO path   OR   CONCAT "text" AS path
     while (*args == ' ' || *args == '\t') ++args;
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return;
+    }
     if (*args == 0 || *args != '"') {
         println("Error: CONCAT expects a quoted string first");
         return;
     }
 
-    // Extract text inside quotes
     char text[256];
     const char* p = args + 1;
     size_t t = 0;
@@ -447,17 +415,14 @@ static void handle_CONCAT(const char* args) {
         println("Error: unterminated string in CONCAT");
         return;
     }
-    ++p; // skip closing quote
+    ++p;
 
-    // Skip spaces
     while (*p == ' ' || *p == '\t') ++p;
-
-    // Expect keyword TO or AS
     bool overwrite = false;
-    if (k_starts_with(p, "TO")) {
+    if ((p[0] == 'T' || p[0] == 't') && (p[1] == 'O' || p[1] == 'o')) {
         overwrite = false;
         p += 2;
-    } else if (k_starts_with(p, "AS")) {
+    } else if ((p[0] == 'A' || p[0] == 'a') && (p[1] == 'S' || p[1] == 's')) {
         overwrite = true;
         p += 2;
     } else {
@@ -477,7 +442,6 @@ static void handle_CONCAT(const char* args) {
         return;
     }
 
-    // Ensure file exists (in v0, CREATE if missing)
     uint32_t inode = ffs::lookup_path(resolved);
     if (inode == 0) {
         if (!ffs::create_file(resolved)) {
@@ -491,52 +455,62 @@ static void handle_CONCAT(const char* args) {
         }
     }
 
-    // im dying
     uint64_t offset = 0;
     if (!overwrite) {
         offset = ffs::file_size(inode);
     }
 
-    if (ffs::write_file(inode, offset, text, t) < 0) {
+    if (ffs::write_file(inode, offset, text, (uint32_t)t) < 0) {
         println("Error: write failed");
     }
 }
 
-// ---- Command dispatcher ----
-// dispatch an ambulance
+// ------------ HELP ------------
+
+static void cmd_help() {
+    println("Clamshell commands:");
+    println("  HELP");
+    println("  SAY <text>");
+    println("  SAY --wd");
+    println("  SAY --whats-inside <path>");
+    println("  LDIR [path]");
+    println("  CDIR <path>");
+    println("  MAKE <name|dir/>");
+    println("  REMOVE <path>");
+    println("  CONCAT \"text\" TO <file>");
+    println("  CONCAT \"text\" AS <file>");
+}
+
+// ------------ command dispatcher ------------
 
 static void execute_line(const char* line) {
-    // Skip leading whitespace
     const char* p = line;
     while (*p == ' ' || *p == '\t') ++p;
-    if (*p == 0) return;        // empty line
-    if (*p == '#') return;      // comment
+    if (*p == 0) return;
+    if (*p == '#') return;
 
-    // Extract command name (up to first space)
     char cmd[16];
     size_t ci = 0;
     while (*p && *p != ' ' && *p != '\t' && ci + 1 < sizeof(cmd)) {
         cmd[ci++] = *p++;
     }
     cmd[ci] = 0;
-
-    // Rest is arguments
     while (*p == ' ' || *p == '\t') ++p;
     const char* args = p;
 
-    if (k_streq(cmd, "HELP")) {
+    if (k_streq_nocase(cmd, "HELP")) {
         cmd_help();
-    } else if (k_streq(cmd, "SAY")) {
+    } else if (k_streq_nocase(cmd, "SAY")) {
         handle_SAY(args);
-    } else if (k_streq(cmd, "LDIR")) {
+    } else if (k_streq_nocase(cmd, "LDIR")) {
         handle_LDIR(args);
-    } else if (k_streq(cmd, "CDIR")) {
+    } else if (k_streq_nocase(cmd, "CDIR")) {
         handle_CDIR(args);
-    } else if (k_streq(cmd, "MAKE")) {
+    } else if (k_streq_nocase(cmd, "MAKE")) {
         handle_MAKE(args);
-    } else if (k_streq(cmd, "REMOVE")) {
+    } else if (k_streq_nocase(cmd, "REMOVE")) {
         handle_REMOVE(args);
-    } else if (k_streq(cmd, "CONCAT")) {
+    } else if (k_streq_nocase(cmd, "CONCAT")) {
         handle_CONCAT(args);
     } else {
         print("Unknown command: ");
@@ -544,25 +518,30 @@ static void execute_line(const char* line) {
     }
 }
 
-// ---- Public API ----
+// ------------ public API ------------
 
 void init() {
-    g_cwd_inode = ffs::root_inode();
+    // kernel already called ffs::init(), but we can sanity check
     g_cwd_path[0] = '/';
     g_cwd_path[1] = 0;
+
+    g_cwd_inode = ffs::root_inode();
+    if (g_cwd_inode == 0) {
+        g_ffs_ready = false;
+        println("Warning: FFS root inode is 0; filesystem not ready.");
+    } else {
+        g_ffs_ready = true;
+    }
 }
 
 void repl() {
-    char line[256];
-
-    println("Welcome to Clamshell (v0) on ZirconiumOS.");
+    println("Welcome to Clamshell on ZirconiumOS.");
     println("Type HELP for a list of commands.\n");
 
+    char line[256];
     while (1) {
-        // Prompt: cwd >
         print(g_cwd_path);
         print(" > ");
-
         read_line(line, sizeof(line));
         execute_line(line);
     }
