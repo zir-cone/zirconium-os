@@ -16,3 +16,4 @@ irq1_stub:
     call keyboard_handler  # call C++ handler
     popa
     iret                   # return from interrupt
+                           # FUCK

@@ -36,7 +36,12 @@ struct __attribute__((packed)) FFS_Inode
     uint16_t    reserved0;
     uint64_t    size;
     FFS_Extent  extents[8];
-    uint8_t     reserved[256 - 1 - 1 - 2 - 8 - 8 *sizeof(FFS_Extent)];
+    uint8_t     reserved[256 
+                         - 1 
+                         - 1 
+                         - 2 
+                         - 8 
+                         - (8 * sizeof(FFS_Extent))];
 };
 
 struct __attribute__((packed)) FFS_DirEntry
@@ -50,17 +55,19 @@ struct __attribute__((packed)) FFS_DirEntry
 
 // public api
 
-namespace ffs
+namespace ffs // its 4 am im so tired 😭
 {
-    bool mount();
-    bool format();
-    bool init();
-    uint32_t lookup_path(const char* path);
-    bool create_file(const char* path);
-    bool create_dir(const char* path);
-    bool remove_path(const char* path);
-    int read_file(uint32_t inode, uint64_t offset, void* buffer, size_t size);
-    int write_file(uint32_t inode, uint64_t offset, const void* buffer, size_t size);
-    bool list_dir(uint32_t dir_inode, void (*callback)(const FFS_DirEntry&));
-    uint32_t root_inode();
+
+    bool        init();
+    bool        format();
+    bool        mount();
+    uint32_t    root_inode();
+    bool        create_file(const char* path);
+    bool        create_dir(const char* path);
+    uint32_t    lookup_path(const char* path);
+    uint64_t    file_size(uint32_t inode);
+    int         read_file(uint32_t inode, uint64_t offset, void* buffer, uint32_t length);
+    int         write_file(uint32_t inode, uint64_t offset, const void* buffer, uint32_t length);
+    bool        list_dir(uint32_t inode, void (*callback)(const FFS_DirEntry&));
+    bool        remove_path(const char* path);
 } // namespace ffs

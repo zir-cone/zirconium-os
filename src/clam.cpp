@@ -97,10 +97,10 @@ static void read_line(char* buf, size_t max_len) {
     buf[0] = 0;
 
     while (1) {
-        char c = keyboard_get_last_char();
-        if (c == 0) {
-            // no new key
-            continue;
+        char c = 0;
+        // Sleep until we actually have a key
+        while ((c = keyboard_get_last_char()) == 0) {
+            asm volatile("hlt");
         }
 
         // Enter
@@ -491,24 +491,19 @@ static void handle_CONCAT(const char* args) {
         }
     }
 
-    if (overwrite) {
-        // Overwrite: write from offset 0, and ignore previous size (v0)
-        if (ffs::write_file(inode, 0, text, t) < 0) {
-            println("Error: write failed");
-        }
-    } else {
-        // Append: find end of file
-        // no public stat in 1.0, so hackywacky time:
-        // read up to some large offset until 0 bytes read to approximate size,
-        // but that's ugly as fuhhhhck. instead just extend ffs later with a stat function.
-        // for now just overwrite as well, but note limitation.
-        if (ffs::write_file(inode, 0, text, t) < 0) {
-            println("Error: write failed (append not fully implemented)");
-        }
+    // im dying
+    uint64_t offset = 0;
+    if (!overwrite) {
+        offset = ffs::file_size(inode);
+    }
+
+    if (ffs::write_file(inode, offset, text, t) < 0) {
+        println("Error: write failed");
     }
 }
 
 // ---- Command dispatcher ----
+// dispatch an ambulance
 
 static void execute_line(const char* line) {
     // Skip leading whitespace

@@ -378,343 +378,358 @@ static bool split_parent_child(const char* path, char* parent_out, size_t parent
 
 // ---------- Namespace ffs implementation ----------
 
-namespace ffs {
-
-bool mount() {
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    if (!ffs_read_block(0, buffer)) return false;
-    FFS_Superblock* sb = (FFS_Superblock*)buffer;
-
-    // Check magic
-    if (sb->magic[0] != 'F' || sb->magic[1] != 'F' ||
-        sb->magic[2] != 'S' || sb->magic[3] != '1') {
-        return false;
-    }
-
-    // Basic sanity
-    if (sb->block_size != FFS_BLOCK_SIZE) return false;
-    if (sb->total_blocks != FFS_TOTAL_BLOCKS) return false;
-
-    g_sb = *sb;
-    g_mounted = true;
-    return true;
-}
-
-bool format() {
-    // We assume block device is already initialized.
-    // 1. Zero entire superblock buffer
-    FFS_Superblock sb;
-    k_memset(&sb, 0, sizeof(sb));
-    sb.magic[0] = 'F';
-    sb.magic[1] = 'F';
-    sb.magic[2] = 'S';
-    sb.magic[3] = '1';
-    sb.version      = 1;
-    sb.block_size   = FFS_BLOCK_SIZE;
-    sb.total_blocks = FFS_TOTAL_BLOCKS;
-
-    sb.bitmap_start      = FFS_BITMAP_START;
-    sb.bitmap_blocks     = FFS_BITMAP_BLOCKS;
-    sb.inode_table_start = FFS_INODE_START;
-    sb.inode_count       = FFS_INODE_COUNT;
-    sb.root_inode        = FFS_ROOT_INODE;
-
-    // Write superblock
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    k_memset(buffer, 0, sizeof(buffer));
-    k_memcpy(buffer, &sb, sizeof(sb));
-    if (!ffs_write_block(0, buffer)) return false;
-
-    // 2. Zero bitmap blocks
-    k_memset(buffer, 0, sizeof(buffer));
-    for (uint32_t b = 0; b < FFS_BITMAP_BLOCKS; ++b) {
-        if (!ffs_write_block(FFS_BITMAP_START + b, buffer)) return false;
-    }
-
-    // 3. Zero inode table blocks
-    k_memset(buffer, 0, sizeof(buffer));
-    for (uint32_t b = 0; b < FFS_INODE_BLOCKS; ++b) {
-        if (!ffs_write_block(FFS_INODE_START + b, buffer)) return false;
-    }
-
-    // 4. Mark reserved blocks as used in bitmap
-    for (uint32_t b = 0; b < FFS_DATA_START; ++b) {
-        if (!bitmap_set(b, true)) return false;
-    }
-
-    // 5. Create root inode
-    FFS_Inode root;
-    k_memset(&root, 0, sizeof(root));
-    root.type = 2; // dir
-    root.size = 0;
-    if (!write_inode(FFS_ROOT_INODE, &root)) return false;
-
-    // 6. Save global superblock
-    g_sb = sb;
-    g_mounted = true;
-
-    return true;
-}
-
-bool init() {
-    if (!bd_init()) return false;
-    if (mount()) return true;
-    if (!format()) return false;
-    return mount();
-}
-
-uint32_t root_inode() {
-    return g_mounted ? g_sb.root_inode : 0;
-}
-
-// Look up a path starting from root, absolute paths only
-uint32_t lookup_path(const char* path) {
-    if (!g_mounted) return 0;
-    if (!path || path[0] == 0) return 0;
-
-    // Root special case
-    if (path[0] == '/' && path[1] == 0) {
-        return g_sb.root_inode;
-    }
-
-    // Working buffer for component names
-    char component[56];
-    uint32_t current_inode = g_sb.root_inode;
-
-    size_t i = 0;
-    size_t len = k_strlen(path);
-    // Skip leading '/'
-    if (path[0] == '/') i = 1;
-
-    while (i < len) {
-        // Extract next component
-        size_t pos = 0;
-        while (i < len && !is_path_separator(path[i])) {
-            if (pos < sizeof(component) - 1) {
-                component[pos++] = path[i];
-            }
-            ++i;
-        }
-        component[pos] = 0;
-
-        if (pos == 0) {
-            // Ignore sequences of '/'
-            ++i;
-            continue;
-        }
-
-        // Look up component in current directory
-        uint32_t next_inode = dir_find_entry_inode(current_inode, component);
-        if (next_inode == 0) return 0;
-
-        current_inode = next_inode;
-
-        // Skip '/'
-        while (i < len && is_path_separator(path[i])) ++i;
-    }
-
-    return current_inode;
-}
-
-// Create empty file at path
-bool create_file(const char* path) {
-    if (!g_mounted) return false;
-    if (!path || path[0] != '/') return false;
-
-    char parent[128];
-    char name[56];
-    if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
-    if (name[0] == 0) return false;
-
-    // Look up parent dir
-    uint32_t parent_inode = lookup_path(parent);
-    if (parent_inode == 0) return false;
-
-    // Ensure no existing entry with same name
-    if (dir_find_entry_inode(parent_inode, name) != 0) {
-        return false; // already exists
-    }
-
-    uint32_t inode_num = alloc_inode(1); // file
-    if (inode_num == 0) return false;
-
-    // Add dir entry
-    if (!dir_add_entry(parent_inode, inode_num, 1, name)) {
-        // TODO: free inode and blocks (not allocating blocks yet for empty file)
-        return false;
-    }
-
-    return true;
-}
-
-// Create directory
-bool create_dir(const char* path) {
-    if (!g_mounted) return false;
-    if (!path || path[0] != '/') return false;
-
-    char parent[128];
-    char name[56];
-    if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
-    if (name[0] == 0) return false;
-
-    uint32_t parent_inode = lookup_path(parent);
-    if (parent_inode == 0) return false;
-
-    if (dir_find_entry_inode(parent_inode, name) != 0) {
-        return false; // already exists
-    }
-
-    uint32_t inode_num = alloc_inode(2); // dir
-    if (inode_num == 0) return false;
-
-    // Add entry in parent
-    if (!dir_add_entry(parent_inode, inode_num, 2, name)) {
-        // TODO: free inode
-        return false;
-    }
-
-    // Optionally, create '.' and '..' entries inside the new dir later.
-
-    return true;
-}
-
-// Remove file/empty dir by path (very minimal, no recursive remove yet)
-bool remove_path(const char* path) {
-    // TODO: implement (optional for v1)
-    (void)path;
-    return false;
-}
-
-int read_file(uint32_t inode_num, uint64_t offset, void* buffer, size_t size) {
-    if (!g_mounted) return -1;
-    if (inode_num == 0 || size == 0) return 0;
-
-    FFS_Inode inode;
-    if (!read_inode(inode_num, &inode)) return -1;
-    if (inode.type != 1) return -1; // not file
-
-    if (offset >= inode.size) return 0;
-
-    if (offset + size > inode.size) {
-        size = (size_t)(inode.size - offset);
-    }
-
-    uint8_t* out = (uint8_t*)buffer;
-    size_t remaining = size;
-    uint64_t off = offset;
-
-    while (remaining > 0) {
-        uint32_t block;
-        uint32_t off_in_block;
-        if (!extent_locate_block(inode, off, block, off_in_block)) break;
-
-        uint8_t blkbuf[FFS_BLOCK_SIZE];
-        if (!ffs_read_block(block, blkbuf)) return -1;
-
-        size_t to_copy = FFS_BLOCK_SIZE - off_in_block;
-        if (to_copy > remaining) to_copy = remaining;
-
-        k_memcpy(out, blkbuf + off_in_block, to_copy);
-
-        out += to_copy;
-        off += to_copy;
-        remaining -= to_copy;
-    }
-
-    return (int)(size - remaining);
-}
-
-int write_file(uint32_t inode_num, uint64_t offset, const void* buffer, size_t size) {
-    if (!g_mounted) return -1;
-    if (inode_num == 0 || size == 0) return 0;
-
-    FFS_Inode inode;
-    if (!read_inode(inode_num, &inode)) return -1;
-    if (inode.type != 1) return -1; // not file
-
-    // Ensure capacity
-    if (!ensure_file_capacity(inode, offset, size)) return -1;
-
-    const uint8_t* in = (const uint8_t*)buffer;
-    size_t remaining = size;
-    uint64_t off = offset;
-
-    while (remaining > 0) {
-        uint32_t block;
-        uint32_t off_in_block;
-        if (!extent_locate_block(inode, off, block, off_in_block)) break;
-
-        uint8_t blkbuf[FFS_BLOCK_SIZE];
-        // If writing full block, no need to read first
-        if (off_in_block == 0 && remaining >= FFS_BLOCK_SIZE) {
-            k_memcpy(blkbuf, in, FFS_BLOCK_SIZE);
-        } else {
-            if (!ffs_read_block(block, blkbuf)) return -1;
-            size_t to_copy = FFS_BLOCK_SIZE - off_in_block;
-            if (to_copy > remaining) to_copy = remaining;
-            k_memcpy(blkbuf + off_in_block, in, to_copy);
-        }
-
-        if (!ffs_write_block(block, blkbuf)) return -1;
-
-        size_t written_here = (remaining >= (FFS_BLOCK_SIZE - off_in_block))
-                                ? (FFS_BLOCK_SIZE - off_in_block)
-                                : remaining;
-        in += written_here;
-        off += written_here;
-        remaining -= written_here;
-    }
-
-    // Update inode size if we wrote past previous end
-    if (!write_inode(inode_num, &inode)) return -1;
-
-    return (int)(size - remaining);
-}
-
-// Directory listing
-bool list_dir(uint32_t dir_inode_num,
-              void (*callback)(const FFS_DirEntry&)) {
-    if (!g_mounted || !callback) return false;
-
-    FFS_Inode inode;
-    if (!read_inode(dir_inode_num, &inode)) return false;
-    if (inode.type != 2) return false;
-
-    uint64_t remaining = inode.size;
-    uint64_t offset = 0;
-
-    uint8_t blkbuf[FFS_BLOCK_SIZE];
-
-    while (remaining > 0) {
-        uint32_t block;
-        uint32_t off_in_block;
-        if (!extent_locate_block(inode, offset, block, off_in_block)) break;
-
-        if (off_in_block != 0) {
-            // For simplicity, assume directory entries are block-aligned
-            // (we won't support partial block at start).
+namespace ffs 
+{
+
+    bool mount() {
+        uint8_t buffer[FFS_BLOCK_SIZE];
+        if (!ffs_read_block(0, buffer)) return false;
+        FFS_Superblock* sb = (FFS_Superblock*)buffer;
+
+        // Check magic
+        if (sb->magic[0] != 'F' || sb->magic[1] != 'F' ||
+            sb->magic[2] != 'S' || sb->magic[3] != '1') {
             return false;
         }
 
-        if (!ffs_read_block(block, blkbuf)) return false;
+        // Basic sanity
+        if (sb->block_size != FFS_BLOCK_SIZE) return false;
+        if (sb->total_blocks != FFS_TOTAL_BLOCKS) return false;
 
-        size_t entries_per_block = FFS_BLOCK_SIZE / sizeof(FFS_DirEntry);
-        FFS_DirEntry* entries = (FFS_DirEntry*)blkbuf;
-        for (size_t i = 0; i < entries_per_block; ++i) {
-            if (entries[i].inode != 0) {
-                callback(entries[i]);
-            }
+        g_sb = *sb;
+        g_mounted = true;
+        return true;
+    
+    }
+    uint64_t file_size(uint32_t inode) {
+        FFS_Inode ino;
+        if (!read_inode(inode, &ino)) {
+            return 0;
         }
-
-        offset += FFS_BLOCK_SIZE;
-        if (remaining > FFS_BLOCK_SIZE) remaining -= FFS_BLOCK_SIZE;
-        else remaining = 0;
+        return (uint64_t)ino.size;
     }
 
-    return true;
-}
+    bool init() {
+        if (g_mounted) return true;
+        if (ffs::mount()) return true;
+        if (!format()) return false;
+        return ffs::mount();
+    }
+    
+    bool format() {
+        // 1. Zero entire superblock buffer
+        FFS_Superblock sb;
+        k_memset(&sb, 0, sizeof(sb));
+        sb.magic[0] = 'F';
+        sb.magic[1] = 'F';
+        sb.magic[2] = 'S';
+        sb.magic[3] = '1';
+        sb.version      = 1;
+        sb.block_size   = FFS_BLOCK_SIZE;
+        sb.total_blocks = FFS_TOTAL_BLOCKS;
+    
+        sb.bitmap_start      = FFS_BITMAP_START;
+        sb.bitmap_blocks     = FFS_BITMAP_BLOCKS;
+        sb.inode_table_start = FFS_INODE_START;
+        sb.inode_count       = FFS_INODE_COUNT;
+        sb.root_inode        = FFS_ROOT_INODE;
+    
+        // Write superblock
+        uint8_t buffer[FFS_BLOCK_SIZE];
+        k_memset(buffer, 0, sizeof(buffer));
+        k_memcpy(buffer, &sb, sizeof(sb));
+        if (!ffs_write_block(0, buffer)) return false;
+    
+        // 2. Zero bitmap blocks
+        k_memset(buffer, 0, sizeof(buffer));
+        for (uint32_t b = 0; b < FFS_BITMAP_BLOCKS; ++b) {
+            if (!ffs_write_block(FFS_BITMAP_START + b, buffer)) return false;
+        }
+    
+        // 3. Zero inode table blocks
+        k_memset(buffer, 0, sizeof(buffer));
+        for (uint32_t b = 0; b < FFS_INODE_BLOCKS; ++b) {
+            if (!ffs_write_block(FFS_INODE_START + b, buffer)) return false;
+        }
+    
+        // 4. Mark reserved blocks as used in bitmap
+        for (uint32_t b = 0; b < FFS_DATA_START; ++b) {
+            if (!bitmap_set(b, true)) return false;
+        }
+    
+        // 5. Create root inode
+        FFS_Inode root;
+        k_memset(&root, 0, sizeof(root));
+        root.type = 2; // dir
+        root.size = 0;
+        if (!write_inode(FFS_ROOT_INODE, &root)) return false;
+    
+        // 6. Save global superblock
+        g_sb = sb;
+        g_mounted = true;
+    
+        return true;
+    }
+    
+    // bool init() {
+    //     if (!bd_init()) return false;
+    //     if (mount()) return true;
+    //     if (!format()) return false;
+    //     return mount();
+    // }
+    
+    uint32_t root_inode() {
+        return g_mounted ? g_sb.root_inode : 0;
+    }
+    
+    // Look up a path starting from root, absolute paths only
+    uint32_t lookup_path(const char* path) {
+        if (!g_mounted) return 0;
+        if (!path || path[0] == 0) return 0;
+    
+        // Root special case
+        if (path[0] == '/' && path[1] == 0) {
+            return g_sb.root_inode;
+        }
+    
+        // Working buffer for component names
+        char component[56];
+        uint32_t current_inode = g_sb.root_inode;
+    
+        size_t i = 0;
+        size_t len = k_strlen(path);
+        // Skip leading '/'
+        if (path[0] == '/') i = 1;
+    
+        while (i < len) {
+            // Extract next component
+            size_t pos = 0;
+            while (i < len && !is_path_separator(path[i])) {
+                if (pos < sizeof(component) - 1) {
+                    component[pos++] = path[i];
+                }
+                ++i;
+            }
+            component[pos] = 0;
+    
+            if (pos == 0) {
+                // Ignore sequences of '/'
+                ++i;
+                continue;
+            }
+    
+            // Look up component in current directory
+            uint32_t next_inode = dir_find_entry_inode(current_inode, component);
+            if (next_inode == 0) return 0;
+    
+            current_inode = next_inode;
+    
+            // Skip '/'
+            while (i < len && is_path_separator(path[i])) ++i;
+        }
+    
+        return current_inode;
+    }
+    
+    // Create empty file at path
+    bool create_file(const char* path) {
+        if (!g_mounted) return false;
+        if (!path || path[0] != '/') return false;
+    
+        char parent[128];
+        char name[56];
+        if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
+        if (name[0] == 0) return false;
+    
+        // Look up parent dir
+        uint32_t parent_inode = lookup_path(parent);
+        if (parent_inode == 0) return false;
+    
+        // Ensure no existing entry with same name
+        if (dir_find_entry_inode(parent_inode, name) != 0) {
+            return false; // already exists
+        }
+    
+        uint32_t inode_num = alloc_inode(1); // file
+        if (inode_num == 0) return false;
+    
+        // Add dir entry
+        if (!dir_add_entry(parent_inode, inode_num, 1, name)) {
+            // TODO: free inode and blocks (not allocating blocks yet for empty file)
+            return false;
+        }
+    
+        return true;
+    }
+    
+    // Create directory
+    bool create_dir(const char* path) {
+        if (!g_mounted) return false;
+        if (!path || path[0] != '/') return false;
+    
+        char parent[128];
+        char name[56];
+        if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
+        if (name[0] == 0) return false;
+    
+        uint32_t parent_inode = lookup_path(parent);
+        if (parent_inode == 0) return false;
+    
+        if (dir_find_entry_inode(parent_inode, name) != 0) {
+            return false; // already exists
+        }
+    
+        uint32_t inode_num = alloc_inode(2); // dir
+        if (inode_num == 0) return false;
+    
+        // Add entry in parent
+        if (!dir_add_entry(parent_inode, inode_num, 2, name)) {
+            // TODO: free inode
+            return false;
+        }
+    
+        // Optionally, create '.' and '..' entries inside the new dir later.
+    
+        return true;
+    }
+    
+    // Remove file/empty dir by path (very minimal, no recursive remove yet)
+    bool remove_path(const char* path) {
+        // TODO: implement (optional for v1)
+        (void)path;
+        return false;
+    }
+    
+    int read_file(uint32_t inode_num, uint64_t offset, void* buffer, size_t size) {
+        if (!g_mounted) return -1;
+        if (inode_num == 0 || size == 0) return 0;
+    
+        FFS_Inode inode;
+        if (!read_inode(inode_num, &inode)) return -1;
+        if (inode.type != 1) return -1; // not file
+    
+        if (offset >= inode.size) return 0;
+    
+        if (offset + size > inode.size) {
+            size = (size_t)(inode.size - offset);
+        }
+    
+        uint8_t* out = (uint8_t*)buffer;
+        size_t remaining = size;
+        uint64_t off = offset;
+    
+        while (remaining > 0) {
+            uint32_t block;
+            uint32_t off_in_block;
+            if (!extent_locate_block(inode, off, block, off_in_block)) break;
+    
+            uint8_t blkbuf[FFS_BLOCK_SIZE];
+            if (!ffs_read_block(block, blkbuf)) return -1;
+    
+            size_t to_copy = FFS_BLOCK_SIZE - off_in_block;
+            if (to_copy > remaining) to_copy = remaining;
+    
+            k_memcpy(out, blkbuf + off_in_block, to_copy);
+    
+            out += to_copy;
+            off += to_copy;
+            remaining -= to_copy;
+        }
+    
+        return (int)(size - remaining);
+    }
+    
+    int write_file(uint32_t inode_num, uint64_t offset, const void* buffer, size_t size) {
+        if (!g_mounted) return -1;
+        if (inode_num == 0 || size == 0) return 0;
+    
+        FFS_Inode inode;
+        if (!read_inode(inode_num, &inode)) return -1;
+        if (inode.type != 1) return -1; // not file
+    
+        // Ensure capacity
+        if (!ensure_file_capacity(inode, offset, size)) return -1;
+    
+        const uint8_t* in = (const uint8_t*)buffer;
+        size_t remaining = size;
+        uint64_t off = offset;
+    
+        while (remaining > 0) {
+            uint32_t block;
+            uint32_t off_in_block;
+            if (!extent_locate_block(inode, off, block, off_in_block)) break;
+    
+            uint8_t blkbuf[FFS_BLOCK_SIZE];
+            // If writing full block, no need to read first
+            if (off_in_block == 0 && remaining >= FFS_BLOCK_SIZE) {
+                k_memcpy(blkbuf, in, FFS_BLOCK_SIZE);
+            } else {
+                if (!ffs_read_block(block, blkbuf)) return -1;
+                size_t to_copy = FFS_BLOCK_SIZE - off_in_block;
+                if (to_copy > remaining) to_copy = remaining;
+                k_memcpy(blkbuf + off_in_block, in, to_copy);
+            }
+    
+            if (!ffs_write_block(block, blkbuf)) return -1;
+    
+            size_t written_here = (remaining >= (FFS_BLOCK_SIZE - off_in_block))
+                                    ? (FFS_BLOCK_SIZE - off_in_block)
+                                    : remaining;
+            in += written_here;
+            off += written_here;
+            remaining -= written_here;
+        }
+    
+        // Update inode size if we wrote past previous end
+        if (!write_inode(inode_num, &inode)) return -1;
+    
+        return (int)(size - remaining);
+    }
+    
+    // Directory listing
+    bool list_dir(uint32_t dir_inode_num,
+                  void (*callback)(const FFS_DirEntry&)) {
+        if (!g_mounted || !callback) return false;
+    
+        FFS_Inode inode;
+        if (!read_inode(dir_inode_num, &inode)) return false;
+        if (inode.type != 2) return false;
+    
+        uint64_t remaining = inode.size;
+        uint64_t offset = 0;
+    
+        uint8_t blkbuf[FFS_BLOCK_SIZE];
+    
+        while (remaining > 0) {
+            uint32_t block;
+            uint32_t off_in_block;
+            if (!extent_locate_block(inode, offset, block, off_in_block)) break;
+    
+            if (off_in_block != 0) {
+                // For simplicity, assume directory entries are block-aligned
+                // (we won't support partial block at start).
+                return false;
+            }
+    
+            if (!ffs_read_block(block, blkbuf)) return false;
+    
+            size_t entries_per_block = FFS_BLOCK_SIZE / sizeof(FFS_DirEntry);
+            FFS_DirEntry* entries = (FFS_DirEntry*)blkbuf;
+            for (size_t i = 0; i < entries_per_block; ++i) {
+                if (entries[i].inode != 0) {
+                    callback(entries[i]);
+                }
+            }
+    
+            offset += FFS_BLOCK_SIZE;
+            if (remaining > FFS_BLOCK_SIZE) remaining -= FFS_BLOCK_SIZE;
+            else remaining = 0;
+        }
+    
+        return true;
+    }
+}// namespace ffs
 
-} // namespace ffs
 
 // ---------- Directory helper implementations ----------
 
