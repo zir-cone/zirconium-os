@@ -1,855 +1,745 @@
 // src/fourty/ffs.cpp
-// main shit for the Fourty Filesystem
-// make no mistake, girl i still love you
-// Terry Davis really was God's chosen programmer
-
 #include "ffs.h"
 #include "block_device.h"
 #include <stdint.h>
+#include <stddef.h>
 
-// internal helpers (no libc)
+// Basic layout constants for a 256 MiB disk
+#define FFS_BLOCK_SIZE       4096
+#define FFS_TOTAL_BLOCKS     (256 * 1024 * 1024 / FFS_BLOCK_SIZE)  // 65536
 
-static void* k_memset(void* dst, int value, size_t size)
-{
-    uint8_t* p = (uint8_t*)dst;
-    for (size_t i = 0; i < size; ++i) {
-        p[i] = (uint8_t)value;
-    }
-    return dst;
-}
+// Layout:
+// block 0               : superblock
+// blocks [1..2]         : block bitmap (65536 bits = 8192 bytes = 2 blocks)
+// blocks [3..(3+63)]    : inode table (1024 inodes * 256 bytes = 256 KiB = 64 blocks)
+// blocks [67..end]      : data blocks
+#define FFS_BITMAP_START           1
+#define FFS_BITMAP_BLOCKS          2
+#define FFS_INODE_TABLE_START      (FFS_BITMAP_START + FFS_BITMAP_BLOCKS)
+#define FFS_INODE_COUNT            1024
+#define FFS_INODES_PER_BLOCK       (FFS_BLOCK_SIZE / (int)sizeof(FFS_Inode))
+#define FFS_INODE_TABLE_BLOCKS     ((FFS_INODE_COUNT + FFS_INODES_PER_BLOCK - 1) / FFS_INODES_PER_BLOCK)
+#define FFS_DATA_START             (FFS_INODE_TABLE_START + FFS_INODE_TABLE_BLOCKS)
 
-static void* k_memcpy(void* dst, const void* src, size_t size)
-{
-    uint8_t* d = (uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    for (size_t i = 0; i < size; ++i) {
-        d[i] = s[i];
-    }
-    return dst;
-}
-
-static size_t k_strlen(const char* s)
-{
-    size_t n = 0;
-    while(s[n]) ++n;
-    return n;
-}
-
-static int k_strncmp(const char* a, const char* b, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        unsigned char ca = (unsigned char)a[i];
-        unsigned char cb = (unsigned char)b[i];
-        if (ca != cb) return (int)ca - (int)cb;
-        if (ca == 0) break;
-    }
-    return 0;
-}
-
-static int k_strcmp(const char* a, const char* b)
-{
-    size_t i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
-        ++i;
-    }
-    return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
-}
-
+// Global state
 static FFS_Superblock g_sb;
-static bool g_mounted = false;
+static bool           g_mounted = false;
 
-// fixed at 256 MiB for FFS 1.0
-static const uint32_t FFS_BLOCK_SIZE        = 4096;
-static const uint32_t FFS_TOTAL_BLOCKS      = 65536;
-static const uint32_t FFS_BITMAP_START      = 1;
-static const uint32_t FFS_BITMAP_BLOCKS     = 2;
-static const uint32_t FFS_INODE_START       = 3;
-static const uint32_t FFS_INODE_COUNT       = 8192;
-static const uint32_t FFS_INODE_BLOCKS      = 512;
-static const uint32_t FFS_DATA_START        = FFS_INODE_START;
-static const uint32_t FFS_ROOT_INODE        = 1;
+// --- low-level block IO wrappers ---
 
-// internal block i/o wrappahs
-
-static bool ffs_read_block(uint32_t block, void* buf)
-{
-    return bd_read_block(block, buf);
+static bool ffs_read_block(uint32_t lba, void* buffer) {
+    return bd_read_block(lba, buffer);
 }
 
-static bool ffs_write_block(uint32_t block, const void* buf) 
-{
-    return bd_write_block(block, buf);
+static bool ffs_write_block(uint32_t lba, const void* buffer) {
+    return bd_write_block(lba, buffer);
 }
 
-// bitmap helpers
-// 1 bit/block
+// --- bitmap helpers: 1 bit per block ---
 
-static bool bitmap_get(uint32_t block)
-{
-    // block in [0, total_blocks)
-    uint32_t rel = block;
-    uint32_t byte_index = rel / 8;
-    uint32_t bit_index  = rel % 8;
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    uint32_t bitmap_block = FFS_BITMAP_BLOCKS + (byte_index / FFS_BLOCK_SIZE);
-    uint32_t offset_in_block = byte_index % FFS_BLOCK_SIZE;
+static bool bitmap_get(uint32_t block, bool* used) {
+    if (block >= FFS_TOTAL_BLOCKS) return false;
+    uint32_t bit_index   = block;
+    uint32_t byte_index  = bit_index >> 3;
+    uint32_t blk_offset  = byte_index / FFS_BLOCK_SIZE;
+    uint32_t byte_in_blk = byte_index % FFS_BLOCK_SIZE;
 
-    if (!ffs_read_block(bitmap_block, buffer)) return true;
-    uint8_t byte = buffer[offset_in_block];
-    return (byte & (1 << bit_index)) != 0;
+    if (blk_offset >= FFS_BITMAP_BLOCKS) return false;
+
+    uint8_t buf[FFS_BLOCK_SIZE];
+    if (!ffs_read_block(FFS_BITMAP_START + blk_offset, buf)) return false;
+
+    uint8_t mask = (uint8_t)(1u << (bit_index & 7));
+    *used = (buf[byte_in_blk] & mask) != 0;
+    return true;
 }
 
+static bool bitmap_set(uint32_t block, bool used) {     // i hate this shit bro ive had to change this function like 20 times
+    if (block >= FFS_TOTAL_BLOCKS) return false;
+    uint32_t bit_index   = block;
+    uint32_t byte_index  = bit_index >> 3;
+    uint32_t blk_offset  = byte_index / FFS_BLOCK_SIZE;
+    uint32_t byte_in_blk = byte_index % FFS_BLOCK_SIZE;
 
-static bool bitmap_set(uint32_t block, bool used) {
-    uint32_t rel = block;
-    uint32_t byte_index = rel / 8;
-    uint32_t bit_index  = rel % 8;
+    if (blk_offset >= FFS_BITMAP_BLOCKS) return false;
 
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    uint32_t bitmap_block = FFS_BITMAP_START + (byte_index / FFS_BLOCK_SIZE);
-    uint32_t offset_in_block = byte_index % FFS_BLOCK_SIZE;
+    uint8_t buf[FFS_BLOCK_SIZE];
+    if (!ffs_read_block(FFS_BITMAP_START + blk_offset, buf)) return false;
 
-    if (!ffs_read_block(bitmap_block, buffer)) return false;
+    uint8_t mask = (uint8_t)(1u << (bit_index & 7));
+    if (used)
+        buf[byte_in_blk] |= mask;
+    else
+        buf[byte_in_blk] &= (uint8_t)~mask;
 
-    uint8_t byte = buffer[offset_in_block];
-    if (used) {
-        byte |= (1 << bit_index);
-    } else {
-        byte &= ~(1 << bit_index);
-    }
-    buffer[offset_in_block] = byte;
-
-    return ffs_write_block(bitmap_block, buffer);
+    if (!ffs_write_block(FFS_BITMAP_START + blk_offset, buf)) return false;
+    return true;
 }
 
-// Allocate a single block; return block index or 0 on failure.
-// Note: block 0 is reserved for superblock, so we never allocate it.
-static uint32_t alloc_block() {
-    // For simplicity, linear scan. You can optimize later.
+static int alloc_block() {
+    // Only allocate from data region
     for (uint32_t b = FFS_DATA_START; b < FFS_TOTAL_BLOCKS; ++b) {
-        if (!bitmap_get(b)) {
-            if (!bitmap_set(b, true)) return 0;
-            return b;
+        bool used = true;
+        if (!bitmap_get(b, &used)) return -1;
+        if (!used) {
+            if (!bitmap_set(b, true)) return -1;
+            // zero the block
+            uint8_t z[FFS_BLOCK_SIZE];
+            for (uint32_t i = 0; i < FFS_BLOCK_SIZE; ++i) z[i] = 0;
+            if (!ffs_write_block(b, z)) return -1;
+            return (int)b;
         }
     }
-    return 0; // no space
+    return -1;
 }
 
-static void free_block(uint32_t block) {
-    // Do not free reserved blocks
-    if (block < FFS_DATA_START) return;
-    bitmap_set(block, false);
-}
+static void free_block(uint32_t b) {
+    if (b < FFS_DATA_START || b >= FFS_TOTAL_BLOCKS) return;
+    bitmap_set(b, false);
+} // IM GONNA KILL MYSELF
 
-// ---------- Inode helpers ----------
+// --- inode helpers ---
 
 static bool read_inode(uint32_t inode_num, FFS_Inode* out) {
-    if (inode_num == 0 || inode_num > FFS_INODE_COUNT) return false;
-    uint32_t idx = inode_num - 1;
-    uint32_t inodes_per_block = FFS_BLOCK_SIZE / sizeof(FFS_Inode); // 16
-    uint32_t block_off = idx / inodes_per_block;
-    uint32_t index_in_block = idx % inodes_per_block;
+    if (inode_num == 0 || inode_num > g_sb.inode_count) return false;
+    uint32_t idx        = inode_num - 1;
+    uint32_t blk_index  = idx / FFS_INODES_PER_BLOCK;
+    uint32_t ino_index  = idx % FFS_INODES_PER_BLOCK;
+    uint8_t  buf[FFS_BLOCK_SIZE];
 
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    if (!ffs_read_block(FFS_INODE_START + block_off, buffer)) return false;
+    if (!ffs_read_block(g_sb.inode_table_start + blk_index, buf)) return false;
 
-    FFS_Inode* table = (FFS_Inode*)buffer;
-    *out = table[index_in_block];
+    FFS_Inode* arr = (FFS_Inode*)buf;
+    *out = arr[ino_index];
     return true;
 }
 
 static bool write_inode(uint32_t inode_num, const FFS_Inode* in) {
-    if (inode_num == 0 || inode_num > FFS_INODE_COUNT) return false;
-    uint32_t idx = inode_num - 1;
-    uint32_t inodes_per_block = FFS_BLOCK_SIZE / sizeof(FFS_Inode);
-    uint32_t block_off = idx / inodes_per_block;
-    uint32_t index_in_block = idx % inodes_per_block;
+    if (inode_num == 0 || inode_num > g_sb.inode_count) return false;
+    uint32_t idx        = inode_num - 1;
+    uint32_t blk_index  = idx / FFS_INODES_PER_BLOCK;
+    uint32_t ino_index  = idx % FFS_INODES_PER_BLOCK;
+    uint8_t  buf[FFS_BLOCK_SIZE];
 
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    if (!ffs_read_block(FFS_INODE_START + block_off, buffer)) return false;
+    if (!ffs_read_block(g_sb.inode_table_start + blk_index, buf)) return false;
+    // about to just kill myself
+    FFS_Inode* arr = (FFS_Inode*)buf;
+    arr[ino_index] = *in;
 
-    FFS_Inode* table = (FFS_Inode*)buffer;
-    table[index_in_block] = *in;
-
-    return ffs_write_block(FFS_INODE_START + block_off, buffer);
+    if (!ffs_write_block(g_sb.inode_table_start + blk_index, buf)) return false;
+    return true;
 }
 
-// Allocate a free inode; returns inode number or 0 on failure.
-static uint32_t alloc_inode(uint8_t type) {
-    uint8_t buffer[FFS_BLOCK_SIZE];
-    uint32_t inodes_per_block = FFS_BLOCK_SIZE / sizeof(FFS_Inode);
-
-    for (uint32_t b = 0; b < FFS_INODE_BLOCKS; ++b) {
-        if (!ffs_read_block(FFS_INODE_START + b, buffer)) return 0;
-        FFS_Inode* table = (FFS_Inode*)buffer;
-        for (uint32_t i = 0; i < inodes_per_block; ++i) {
-            uint32_t inode_num = b * inodes_per_block + i + 1;
-            if (inode_num == 0 || inode_num > FFS_INODE_COUNT) break;
-            if (table[i].type == 0) {
-                // Free inode
-                k_memset(&table[i], 0, sizeof(FFS_Inode));
-                table[i].type = type;
-                table[i].size = 0;
-                if (!ffs_write_block(FFS_INODE_START + b, buffer)) return 0;
-                return inode_num;
+static uint32_t alloc_inode() {
+    for (uint32_t i = 1; i <= g_sb.inode_count; ++i) {
+        FFS_Inode ino;
+        if (!read_inode(i, &ino)) return 0;
+        if (ino.type == 0) {
+            // clear it
+            ino.type      = 0;
+            ino.flags     = 0;
+            ino.reserved0 = 0;
+            ino.size      = 0;
+            for (int j = 0; j < 8; ++j) {
+                ino.extents[j].start_block = 0;
+                ino.extents[j].block_count = 0;
             }
-        }
+            for (size_t j = 0; j < sizeof(ino.reserved); ++j) {
+                ino.reserved[j] = 0;
+            }
+            if (!write_inode(i, &ino)) return 0;
+            return i;
+        }   
     }
     return 0;
 }
 
-// ---------- Extent helpers ----------
+// --- directory helpers ---
+// We only support a single extent for directories (one data block).
 
-// Find block that corresponds to byte offset within file, given inode.
-// Returns block index and offset_in_block via out parameters.
-// Returns false if offset >= size or no extent covers that offset.
-static bool extent_locate_block(const FFS_Inode& inode,
-                                uint64_t offset,
-                                uint32_t& out_block,
-                                uint32_t& out_offset_in_block) {
-    uint64_t remaining = offset;
-    for (int e = 0; e < 8; ++e) {
-        const FFS_Extent& ex = inode.extents[e];
-        if (ex.block_count == 0) continue;
-        uint64_t extent_bytes = (uint64_t)ex.block_count * FFS_BLOCK_SIZE;
-        if (remaining < extent_bytes) {
-            uint32_t block_index_in_extent = (uint32_t)(remaining / FFS_BLOCK_SIZE);
-            out_offset_in_block = (uint32_t)(remaining % FFS_BLOCK_SIZE);
-            out_block = ex.start_block + block_index_in_extent;
-            return true;
+#define FFS_DIRENTRIES_PER_BLOCK (FFS_BLOCK_SIZE / (int)sizeof(FFS_DirEntry))
+
+static bool dir_load_block(uint32_t dir_inode, FFS_Inode* dir_ino, uint8_t* buf) {
+    if (!read_inode(dir_inode, dir_ino)) return false;
+    if (dir_ino->type != 2) return false; // not a directory
+    if (dir_ino->extents[0].start_block == 0 || dir_ino->extents[0].block_count == 0) {
+        return false;
+    }
+    uint32_t block = dir_ino->extents[0].start_block;
+    if (!ffs_read_block(block, buf)) return false;
+    return true; // im actually just gonna kill myself this shit is infuriating
+}
+
+static bool dir_save_block(uint32_t dir_inode, const FFS_Inode* dir_ino, const uint8_t* buf) {
+    if (dir_ino->extents[0].start_block == 0 || dir_ino->extents[0].block_count == 0) {
+        return false;
+    }
+    uint32_t block = dir_ino->extents[0].start_block;
+    if (!ffs_write_block(block, buf)) return false;
+    if (!write_inode(dir_inode, dir_ino)) return false;
+    return true;
+}
+
+static bool dir_find_entry(uint32_t dir_inode, const char* name, size_t name_len, FFS_DirEntry* out) {
+    FFS_Inode dir_ino;
+    uint8_t   buf[FFS_BLOCK_SIZE];
+    if (!dir_load_block(dir_inode, &dir_ino, buf)) return false;
+
+    FFS_DirEntry* ents = (FFS_DirEntry*)buf;
+    for (int i = 0; i < FFS_DIRENTRIES_PER_BLOCK; ++i) {
+        if (ents[i].inode == 0 || ents[i].name_len == 0) continue;
+        if (ents[i].name_len != name_len) continue;
+        bool match = true;
+        for (size_t j = 0; j < name_len; ++j) {
+            if (ents[i].name[j] != name[j]) {
+                match = false; break;
+                // FUCK
+            }
         }
-        remaining -= extent_bytes;
+        if (match) {
+            if (out) *out = ents[i];
+            return true; 
+        }
     }
     return false;
 }
 
-// Ensure there is enough space to write 'size' bytes at 'offset'.
-// Returns true on success and updates inode (but does NOT write it back to disk).
-static bool ensure_file_capacity(FFS_Inode& inode, uint64_t offset, uint64_t size) {
-    uint64_t end = offset + size;
-    if (end <= inode.size) {
-        return true; // already large enough
+static bool dir_add_entry(uint32_t dir_inode, uint32_t inode_num, uint8_t type,
+                          const char* name, size_t name_len) {
+    if (name_len > 55) name_len = 55;
+
+    FFS_Inode dir_ino;
+    uint8_t   buf[FFS_BLOCK_SIZE];
+
+    if (!read_inode(dir_inode, &dir_ino)) return false;
+    if (dir_ino.type != 2) return false;
+
+    if (dir_ino.extents[0].start_block == 0 || dir_ino.extents[0].block_count == 0) {
+        // allocate data block for this dir
+        int b = alloc_block();
+        if (b < 0) return false;
+        dir_ino.extents[0].start_block = (uint32_t)b;
+        dir_ino.extents[0].block_count = 1;
+        // zero it
+        for (uint32_t i = 0; i < FFS_BLOCK_SIZE; ++i) buf[i] = 0;
+    } else {
+        if (!ffs_read_block(dir_ino.extents[0].start_block, buf)) return false;
     }
 
-    // How many bytes currently backed by extents?
-    uint64_t backed = 0;
-    for (int e = 0; e < 8; ++e) {
-        const FFS_Extent& ex = inode.extents[e];
-        if (ex.block_count == 0) continue;
-        backed += (uint64_t)ex.block_count * FFS_BLOCK_SIZE;
-    }
+    FFS_DirEntry* ents = (FFS_DirEntry*)buf;
 
-    if (end <= backed) {
-        // Already enough extents, just update size
-        inode.size = end;
-        return true;
-    }
-
-    // Need more blocks
-    uint64_t extra_bytes = end - backed;
-    uint32_t extra_blocks = (uint32_t)((extra_bytes + FFS_BLOCK_SIZE - 1) / FFS_BLOCK_SIZE);
-
-    // Try to extend last extent if possible
-    int last_e = -1;
-    for (int e = 7; e >= 0; --e) {
-        if (inode.extents[e].block_count != 0) {
-            last_e = e;
-            break;
-        }
-    }
-
-    while (extra_blocks > 0) {
-        if (last_e >= 0) {
-            // Try extending last extent by 1 block at a time
-            uint32_t last_block = inode.extents[last_e].start_block +
-                                  inode.extents[last_e].block_count - 1;
-            uint32_t candidate = last_block + 1;
-            if (candidate < FFS_TOTAL_BLOCKS && !bitmap_get(candidate)) {
-                if (!bitmap_set(candidate, true)) return false;
-                inode.extents[last_e].block_count += 1;
-                extra_blocks -= 1;
-                continue;
+    // find free slot
+    for (int i = 0; i < FFS_DIRENTRIES_PER_BLOCK; ++i) {
+        if (ents[i].inode == 0 || ents[i].name_len == 0) {
+            ents[i].inode    = inode_num;
+            ents[i].type     = type;
+            ents[i].name_len = (uint8_t)name_len;
+            ents[i].reserved[0] = 0;
+            ents[i].reserved[1] = 0;
+            for (size_t j = 0; j < 56; ++j) ents[i].name[j] = 0;
+            for (size_t j = 0; j < name_len && j < 56; ++j) {
+                ents[i].name[j] = name[j];
             }
+            // update dir size (simple: count entries)
+            dir_ino.size = (uint64_t)FFS_BLOCK_SIZE;
+            if (!dir_save_block(dir_inode, &dir_ino, buf)) return false;
+            return true;
         }
-
-        // Need a new extent
-        int new_e = -1;
-        for (int e = 0; e < 8; ++e) {
-            if (inode.extents[e].block_count == 0) {
-                new_e = e;
-                break;
-            }
-        }
-        if (new_e < 0) {
-            // No more extents available
-            return false;
-        }
-
-        // Allocate at least 1 block, maybe more contiguous blocks
-        uint32_t start = alloc_block();
-        if (start == 0) return false;
-
-        inode.extents[new_e].start_block = start;
-        inode.extents[new_e].block_count = 1;
-        extra_blocks -= 1;
-
-        // Try to extend the new extent greedily for remaining blocks
-        while (extra_blocks > 0) {
-            uint32_t candidate = inode.extents[new_e].start_block +
-                                 inode.extents[new_e].block_count;
-            if (candidate < FFS_TOTAL_BLOCKS && !bitmap_get(candidate)) {
-                if (!bitmap_set(candidate, true)) return false;
-                inode.extents[new_e].block_count += 1;
-                extra_blocks -= 1;
-            } else {
-                break;
-            }
-        }
-
-        last_e = new_e;
     }
 
-    inode.size = end;
-    return true;
+    // directory full (only 1 block supported)
+    return false;
 }
 
-// ---------- Directory helpers ----------
+static bool dir_remove_entry(uint32_t dir_inode, const char* name, size_t name_len) {
+    FFS_Inode dir_ino;
+    uint8_t   buf[FFS_BLOCK_SIZE];
+    if (!dir_load_block(dir_inode, &dir_ino, buf)) return false;
 
-static bool dir_add_entry(uint32_t dir_inode_num,
-                          uint32_t child_inode_num,
-                          uint8_t child_type,
-                          const char* name);
-
-static uint32_t dir_find_entry_inode(uint32_t dir_inode_num, const char* name);
-
-// ---------- Path utilities ----------
-
-static bool is_path_separator(char c) {
-    return c == '/';
+    FFS_DirEntry* ents = (FFS_DirEntry*)buf;    // FUCKING RED SQUIGGLY LINES 
+    for (int i = 0; i < FFS_DIRENTRIES_PER_BLOCK; ++i) {    // piece of SHIT
+        if (ents[i].inode == 0 || ents[i].name_len == 0) continue;
+        if (ents[i].name_len != name_len) continue;
+        bool match = true;
+        for (size_t j = 0; j < name_len; ++j) {
+            if (ents[i].name[j] != name[j]) { match = false; break; }
+        }
+        if (match) {
+            ents[i].inode    = 0;
+            ents[i].type     = 0;
+            ents[i].name_len = 0;
+            for (size_t j = 0; j < 56; ++j) ents[i].name[j] = 0;
+            if (!dir_save_block(dir_inode, &dir_ino, buf)) return false;
+            return true;
+        } // IM GOING TO KILl MYSELF
+    }
+    return false;
 }
 
-// Split path into parent + name.
-// Example: "/foo/bar.txt" -> parent="/foo", name="bar.txt"
-// Special: "/" → parent="/" name="" (used for root)
-static bool split_parent_child(const char* path, char* parent_out, size_t parent_cap,
-                               char* name_out, size_t name_cap) {
-    size_t len = k_strlen(path);
-    if (len == 0) return false;
+static bool dir_is_empty_except_dots(uint32_t dir_inode) {
+    FFS_Inode dir_ino;
+    uint8_t   buf[FFS_BLOCK_SIZE];
+    if (!dir_load_block(dir_inode, &dir_ino, buf)) return false;
 
-    // If path == "/", parent = "/", name = ""
-    if (len == 1 && path[0] == '/') {
-        if (parent_cap > 0) {
-            parent_out[0] = '/';
-            if (parent_cap > 1) parent_out[1] = 0;
-            else parent_out[0] = 0;
-        }
-        if (name_cap > 0) name_out[0] = 0;
-        return true;
-    }
-
-    // Find last '/'
-    int last_slash = -1;
-    for (int i = (int)len - 1; i >= 0; --i) {
-        if (path[i] == '/') {
-            last_slash = i;
-            break;
-        }
-    }
-    if (last_slash < 0) return false; // invalid; for now require absolute
-
-    size_t name_len = len - (size_t)last_slash - 1;
-    if (name_len >= name_cap) return false;
-    for (size_t i = 0; i < name_len; ++i) {
-        name_out[i] = path[last_slash + 1 + i];
-    }
-    name_out[name_len] = 0;
-
-    size_t parent_len = (size_t)last_slash;
-    if (parent_len == 0) parent_len = 1; // root
-    if (parent_len >= parent_cap) return false;
-
-    for (size_t i = 0; i < parent_len; ++i) {
-        parent_out[i] = path[i];
-    }
-    parent_out[parent_len] = 0;
-
-    return true;
-}
-
-// ---------- Namespace ffs implementation ----------
-
-namespace ffs 
-{
-
-    bool mount() {
-        uint8_t buffer[FFS_BLOCK_SIZE];
-        if (!ffs_read_block(0, buffer)) return false;
-        FFS_Superblock* sb = (FFS_Superblock*)buffer;
-
-        // Check magic
-        if (sb->magic[0] != 'F' || sb->magic[1] != 'F' ||
-            sb->magic[2] != 'S' || sb->magic[3] != '1') {
-            return false;
-        }
-
-        // Basic sanity
-        if (sb->block_size != FFS_BLOCK_SIZE) return false;
-        if (sb->total_blocks != FFS_TOTAL_BLOCKS) return false;
-
-        g_sb = *sb;
-        g_mounted = true;
-        return true;
-    
-    }
-    uint64_t file_size(uint32_t inode) {
-        FFS_Inode ino;
-        if (!read_inode(inode, &ino)) {
-            return 0;
-        }
-        return (uint64_t)ino.size;
-    }
-
-    bool init() {
-        if (g_mounted) return true;
-        if (ffs::mount()) return true;
-        if (!format()) return false;
-        return ffs::mount();
-    }
-    
-    bool format() {
-        // 1. Zero entire superblock buffer
-        FFS_Superblock sb;
-        k_memset(&sb, 0, sizeof(sb));
-        sb.magic[0] = 'F';
-        sb.magic[1] = 'F';
-        sb.magic[2] = 'S';
-        sb.magic[3] = '1';
-        sb.version      = 1;
-        sb.block_size   = FFS_BLOCK_SIZE;
-        sb.total_blocks = FFS_TOTAL_BLOCKS;
-    
-        sb.bitmap_start      = FFS_BITMAP_START;
-        sb.bitmap_blocks     = FFS_BITMAP_BLOCKS;
-        sb.inode_table_start = FFS_INODE_START;
-        sb.inode_count       = FFS_INODE_COUNT;
-        sb.root_inode        = FFS_ROOT_INODE;
-    
-        // Write superblock
-        uint8_t buffer[FFS_BLOCK_SIZE];
-        k_memset(buffer, 0, sizeof(buffer));
-        k_memcpy(buffer, &sb, sizeof(sb));
-        if (!ffs_write_block(0, buffer)) return false;
-    
-        // 2. Zero bitmap blocks
-        k_memset(buffer, 0, sizeof(buffer));
-        for (uint32_t b = 0; b < FFS_BITMAP_BLOCKS; ++b) {
-            if (!ffs_write_block(FFS_BITMAP_START + b, buffer)) return false;
-        }
-    
-        // 3. Zero inode table blocks
-        k_memset(buffer, 0, sizeof(buffer));
-        for (uint32_t b = 0; b < FFS_INODE_BLOCKS; ++b) {
-            if (!ffs_write_block(FFS_INODE_START + b, buffer)) return false;
-        }
-    
-        // 4. Mark reserved blocks as used in bitmap
-        for (uint32_t b = 0; b < FFS_DATA_START; ++b) {
-            if (!bitmap_set(b, true)) return false;
-        }
-    
-        // 5. Create root inode
-        FFS_Inode root;
-        k_memset(&root, 0, sizeof(root));
-        root.type = 2; // dir
-        root.size = 0;
-        if (!write_inode(FFS_ROOT_INODE, &root)) return false;
-    
-        // 6. Save global superblock
-        g_sb = sb;
-        g_mounted = true;
-    
-        return true;
-    }
-    
-    // bool init() {
-    //     if (!bd_init()) return false;
-    //     if (mount()) return true;
-    //     if (!format()) return false;
-    //     return mount();
-    // }
-    
-    uint32_t root_inode() {
-        return g_mounted ? g_sb.root_inode : 0;
-    }
-    
-    // Look up a path starting from root, absolute paths only
-    uint32_t lookup_path(const char* path) {
-        if (!g_mounted) return 0;
-        if (!path || path[0] == 0) return 0;
-    
-        // Root special case
-        if (path[0] == '/' && path[1] == 0) {
-            return g_sb.root_inode;
-        }
-    
-        // Working buffer for component names
-        char component[56];
-        uint32_t current_inode = g_sb.root_inode;
-    
-        size_t i = 0;
-        size_t len = k_strlen(path);
-        // Skip leading '/'
-        if (path[0] == '/') i = 1;
-    
-        while (i < len) {
-            // Extract next component
-            size_t pos = 0;
-            while (i < len && !is_path_separator(path[i])) {
-                if (pos < sizeof(component) - 1) {
-                    component[pos++] = path[i];
-                }
-                ++i;
-            }
-            component[pos] = 0;
-    
-            if (pos == 0) {
-                // Ignore sequences of '/'
-                ++i;
-                continue;
-            }
-    
-            // Look up component in current directory
-            uint32_t next_inode = dir_find_entry_inode(current_inode, component);
-            if (next_inode == 0) return 0;
-    
-            current_inode = next_inode;
-    
-            // Skip '/'
-            while (i < len && is_path_separator(path[i])) ++i;
-        }
-    
-        return current_inode;
-    }
-    
-    // Create empty file at path
-    bool create_file(const char* path) {
-        if (!g_mounted) return false;
-        if (!path || path[0] != '/') return false;
-    
-        char parent[128];
-        char name[56];
-        if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
-        if (name[0] == 0) return false;
-    
-        // Look up parent dir
-        uint32_t parent_inode = lookup_path(parent);
-        if (parent_inode == 0) return false;
-    
-        // Ensure no existing entry with same name
-        if (dir_find_entry_inode(parent_inode, name) != 0) {
-            return false; // already exists
-        }
-    
-        uint32_t inode_num = alloc_inode(1); // file
-        if (inode_num == 0) return false;
-    
-        // Add dir entry
-        if (!dir_add_entry(parent_inode, inode_num, 1, name)) {
-            // TODO: free inode and blocks (not allocating blocks yet for empty file)
-            return false;
-        }
-    
-        return true;
-    }
-    
-    // Create directory
-    bool create_dir(const char* path) {
-        if (!g_mounted) return false;
-        if (!path || path[0] != '/') return false;
-    
-        char parent[128];
-        char name[56];
-        if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
-        if (name[0] == 0) return false;
-    
-        uint32_t parent_inode = lookup_path(parent);
-        if (parent_inode == 0) return false;
-    
-        if (dir_find_entry_inode(parent_inode, name) != 0) {
-            return false; // already exists
-        }
-    
-        uint32_t inode_num = alloc_inode(2); // dir
-        if (inode_num == 0) return false;
-    
-        // Add entry in parent
-        if (!dir_add_entry(parent_inode, inode_num, 2, name)) {
-            // TODO: free inode
-            return false;
-        }
-    
-        // Optionally, create '.' and '..' entries inside the new dir later.
-    
-        return true;
-    }
-    
-    // Remove file/empty dir by path (very minimal, no recursive remove yet)
-    bool remove_path(const char* path) {
-        // TODO: implement (optional for v1)
-        (void)path;
+    FFS_DirEntry* ents = (FFS_DirEntry*)buf;
+    for (int i = 0; i < FFS_DIRENTRIES_PER_BLOCK; ++i) {
+        if (ents[i].inode == 0 || ents[i].name_len == 0) continue;
+        // '.' or '..'?
+        if (ents[i].name_len == 1 && ents[i].name[0] == '.') continue;
+        if (ents[i].name_len == 2 && ents[i].name[0] == '.' && ents[i].name[1] == '.') continue;
         return false;
     }
-    
-    int read_file(uint32_t inode_num, uint64_t offset, void* buffer, size_t size) {
-        if (!g_mounted) return -1;
-        if (inode_num == 0 || size == 0) return 0;
-    
-        FFS_Inode inode;
-        if (!read_inode(inode_num, &inode)) return -1;
-        if (inode.type != 1) return -1; // not file
-    
-        if (offset >= inode.size) return 0;
-    
-        if (offset + size > inode.size) {
-            size = (size_t)(inode.size - offset);
-        }
-    
-        uint8_t* out = (uint8_t*)buffer;
-        size_t remaining = size;
-        uint64_t off = offset;
-    
-        while (remaining > 0) {
-            uint32_t block;
-            uint32_t off_in_block;
-            if (!extent_locate_block(inode, off, block, off_in_block)) break;
-    
-            uint8_t blkbuf[FFS_BLOCK_SIZE];
-            if (!ffs_read_block(block, blkbuf)) return -1;
-    
-            size_t to_copy = FFS_BLOCK_SIZE - off_in_block;
-            if (to_copy > remaining) to_copy = remaining;
-    
-            k_memcpy(out, blkbuf + off_in_block, to_copy);
-    
-            out += to_copy;
-            off += to_copy;
-            remaining -= to_copy;
-        }
-    
-        return (int)(size - remaining);
+    return true;
+}
+
+// Initialize a directory inode's data block with '.' and '..'
+static bool dir_init_dot_entries(uint32_t dir_inode, uint32_t parent_inode) {
+    FFS_Inode dir_ino;
+    uint8_t   buf[FFS_BLOCK_SIZE];
+
+    if (!read_inode(dir_inode, &dir_ino)) return false;
+    if (dir_ino.extents[0].start_block == 0 || dir_ino.extents[0].block_count == 0) {
+        int b = alloc_block();
+        if (b < 0) return false;
+        dir_ino.extents[0].start_block = (uint32_t)b;
+        dir_ino.extents[0].block_count = 1;
     }
-    
-    int write_file(uint32_t inode_num, uint64_t offset, const void* buffer, size_t size) {
-        if (!g_mounted) return -1;
-        if (inode_num == 0 || size == 0) return 0;
-    
-        FFS_Inode inode;
-        if (!read_inode(inode_num, &inode)) return -1;
-        if (inode.type != 1) return -1; // not file
-    
-        // Ensure capacity
-        if (!ensure_file_capacity(inode, offset, size)) return -1;
-    
-        const uint8_t* in = (const uint8_t*)buffer;
-        size_t remaining = size;
-        uint64_t off = offset;
-    
-        while (remaining > 0) {
-            uint32_t block;
-            uint32_t off_in_block;
-            if (!extent_locate_block(inode, off, block, off_in_block)) break;
-    
-            uint8_t blkbuf[FFS_BLOCK_SIZE];
-            // If writing full block, no need to read first
-            if (off_in_block == 0 && remaining >= FFS_BLOCK_SIZE) {
-                k_memcpy(blkbuf, in, FFS_BLOCK_SIZE);
-            } else {
-                if (!ffs_read_block(block, blkbuf)) return -1;
-                size_t to_copy = FFS_BLOCK_SIZE - off_in_block;
-                if (to_copy > remaining) to_copy = remaining;
-                k_memcpy(blkbuf + off_in_block, in, to_copy);
+
+    for (uint32_t i = 0; i < FFS_BLOCK_SIZE; ++i) buf[i] = 0;
+
+    FFS_DirEntry* ents = (FFS_DirEntry*)buf;
+
+    // '.'
+    ents[0].inode    = dir_inode;
+    ents[0].type     = 2;
+    ents[0].name_len = 1;
+    ents[0].reserved[0] = ents[0].reserved[1] = 0;
+    ents[0].name[0]  = '.';
+    for (int i = 1; i < 56; ++i) ents[0].name[i] = 0;
+
+    // '..'
+    ents[1].inode    = parent_inode;
+    ents[1].type     = 2;
+    ents[1].name_len = 2;
+    ents[1].reserved[0] = ents[1].reserved[1] = 0;
+    ents[1].name[0]  = '.';
+    ents[1].name[1]  = '.';
+    for (int i = 2; i < 56; ++i) ents[1].name[i] = 0;
+
+    dir_ino.type = 2;
+    dir_ino.flags = 0;
+    dir_ino.size  = (uint64_t)FFS_BLOCK_SIZE;
+
+    if (!dir_save_block(dir_inode, &dir_ino, buf)) return false;
+    return true;
+}
+
+// --- path walking helpers ---
+
+static size_t k_strlen(const char* s) {
+    size_t n = 0;
+    if (!s) return 0;
+    while (s[n]) ++n;
+    return n;
+}
+
+// Walk absolute path like "/foo/bar". Returns inode or 0.
+static uint32_t walk_path(const char* path) {
+    if (!g_mounted) return 0;
+    if (!path || path[0] == 0) return 0;
+    if (path[0] != '/') return 0;
+
+    uint32_t inode = g_sb.root_inode;
+    const char* p = path;
+
+    // skip leading '/'
+    while (*p == '/') ++p;
+
+    char name[56];
+
+    while (*p) {
+        // extract component
+        size_t len = 0;
+        while (*p && *p != '/' && len + 1 < sizeof(name)) {
+            name[len++] = *p++;
+        }
+        name[len] = 0;
+
+        // skip duplicate '/'
+        while (*p == '/') ++p;
+
+        if (len == 0) continue;
+
+        // '.' and '..'
+        if (len == 1 && name[0] == '.') {
+            continue;
+        }
+        if (len == 2 && name[0] == '.' && name[1] == '.') {
+            // go to parent dir: find ".." entry
+            FFS_DirEntry ent;
+            if (!dir_find_entry(inode, "..", 2, &ent)) {
+                // if something weird, stay
+                continue;
             }
-    
-            if (!ffs_write_block(block, blkbuf)) return -1;
-    
-            size_t written_here = (remaining >= (FFS_BLOCK_SIZE - off_in_block))
-                                    ? (FFS_BLOCK_SIZE - off_in_block)
-                                    : remaining;
-            in += written_here;
-            off += written_here;
-            remaining -= written_here;
-        }
-    
-        // Update inode size if we wrote past previous end
-        if (!write_inode(inode_num, &inode)) return -1;
-    
-        return (int)(size - remaining);
-    }
-    
-    // Directory listing
-    bool list_dir(uint32_t dir_inode_num,
-                  void (*callback)(const FFS_DirEntry&)) {
-        if (!g_mounted || !callback) return false;
-    
-        FFS_Inode inode;
-        if (!read_inode(dir_inode_num, &inode)) return false;
-        if (inode.type != 2) return false;
-    
-        uint64_t remaining = inode.size;
-        uint64_t offset = 0;
-    
-        uint8_t blkbuf[FFS_BLOCK_SIZE];
-    
-        while (remaining > 0) {
-            uint32_t block;
-            uint32_t off_in_block;
-            if (!extent_locate_block(inode, offset, block, off_in_block)) break;
-    
-            if (off_in_block != 0) {
-                // For simplicity, assume directory entries are block-aligned
-                // (we won't support partial block at start).
-                return false;
-            }
-    
-            if (!ffs_read_block(block, blkbuf)) return false;
-    
-            size_t entries_per_block = FFS_BLOCK_SIZE / sizeof(FFS_DirEntry);
-            FFS_DirEntry* entries = (FFS_DirEntry*)blkbuf;
-            for (size_t i = 0; i < entries_per_block; ++i) {
-                if (entries[i].inode != 0) {
-                    callback(entries[i]);
-                }
-            }
-    
-            offset += FFS_BLOCK_SIZE;
-            if (remaining > FFS_BLOCK_SIZE) remaining -= FFS_BLOCK_SIZE;
-            else remaining = 0;
-        }
-    
-        return true;
-    }
-}// namespace ffs
-
-
-// ---------- Directory helper implementations ----------
-
-static bool dir_add_entry(uint32_t dir_inode_num,
-                          uint32_t child_inode_num,
-                          uint8_t child_type,
-                          const char* name) {
-    if (dir_inode_num == 0 || child_inode_num == 0) return false;
-
-    FFS_Inode dir_inode;
-    if (!read_inode(dir_inode_num, &dir_inode)) return false;
-    if (dir_inode.type != 2) return false;
-
-    size_t name_len = k_strlen(name);
-    if (name_len == 0 || name_len > 55) return false;
-
-    // Find a free DirEntry slot or extend directory by one block.
-    uint64_t offset = 0;
-    uint64_t dir_size = dir_inode.size;
-    uint8_t blkbuf[FFS_BLOCK_SIZE];
-
-    // If directory size is 0, allocate one block
-    if (dir_size == 0) {
-        if (!ensure_file_capacity(dir_inode, 0, FFS_BLOCK_SIZE)) return false;
-        dir_size = dir_inode.size;
-        if (!write_inode(dir_inode_num, &dir_inode)) return false;
-    }
-
-    while (true) {
-        uint32_t block;
-        uint32_t off_in_block;
-        if (!extent_locate_block(dir_inode, offset, block, off_in_block)) {
-            // No block covers this offset; extend dir by one block
-            if (!ensure_file_capacity(dir_inode, dir_size, FFS_BLOCK_SIZE)) return false;
-            dir_size = dir_inode.size;
-            if (!write_inode(dir_inode_num, &dir_inode)) return false;
-            // And loop again
+            inode = ent.inode;
             continue;
         }
 
-        if (off_in_block != 0) {
-            // Directory entries must be block-aligned
-            return false;
-        }
-
-        if (!ffs_read_block(block, blkbuf)) return false;
-
-        size_t entries_per_block = FFS_BLOCK_SIZE / sizeof(FFS_DirEntry);
-        FFS_DirEntry* entries = (FFS_DirEntry*)blkbuf;
-
-        for (size_t i = 0; i < entries_per_block; ++i) {
-            if (entries[i].inode == 0) {
-                // Free slot
-                entries[i].inode    = child_inode_num;
-                entries[i].type     = child_type;
-                entries[i].name_len = (uint8_t)name_len;
-                entries[i].reserved[0] = entries[i].reserved[1] = 0;
-                k_memset(entries[i].name, 0, sizeof(entries[i].name));
-                for (size_t j = 0; j < name_len && j < sizeof(entries[i].name) - 1; ++j) {
-                    entries[i].name[j] = name[j];
-                }
-
-                if (!ffs_write_block(block, blkbuf)) return false;
-                return true;
-            }
-        }
-
-        offset += FFS_BLOCK_SIZE;
-        if (offset >= dir_size) {
-            // Need to extend dir; loop again
-            if (!ensure_file_capacity(dir_inode, dir_size, FFS_BLOCK_SIZE)) return false;
-            dir_size = dir_inode.size;
-            if (!write_inode(dir_inode_num, &dir_inode)) return false;
-        }
-    }
-
-    // Unreachable
-    // return false;
-}
-
-static uint32_t dir_find_entry_inode(uint32_t dir_inode_num, const char* name) {
-    if (dir_inode_num == 0) return 0;
-
-    FFS_Inode dir_inode;
-    if (!read_inode(dir_inode_num, &dir_inode)) return 0;
-    if (dir_inode.type != 2) return 0;
-
-    size_t name_len = k_strlen(name);
-    if (name_len == 0 || name_len > 55) return 0;
-
-    uint64_t remaining = dir_inode.size;
-    uint64_t offset = 0;
-    uint8_t blkbuf[FFS_BLOCK_SIZE];
-
-    while (remaining > 0) {
-        uint32_t block;
-        uint32_t off_in_block;
-        if (!extent_locate_block(dir_inode, offset, block, off_in_block)) break;
-
-        if (off_in_block != 0) {
-            // Directory entries must be block-aligned
+        // normal component
+        FFS_DirEntry ent;
+        if (!dir_find_entry(inode, name, len, &ent)) {
             return 0;
         }
-
-        if (!ffs_read_block(block, blkbuf)) return 0;
-
-        size_t entries_per_block = FFS_BLOCK_SIZE / sizeof(FFS_DirEntry);
-        FFS_DirEntry* entries = (FFS_DirEntry*)blkbuf;
-        for (size_t i = 0; i < entries_per_block; ++i) {
-            if (entries[i].inode == 0) continue;
-            if (entries[i].name_len != name_len) continue;
-            if (k_strncmp(entries[i].name, name, name_len) == 0) {
-                return entries[i].inode;
-            }
-        }
-
-        offset += FFS_BLOCK_SIZE;
-        if (remaining > FFS_BLOCK_SIZE) remaining -= FFS_BLOCK_SIZE;
-        else remaining = 0;
+        inode = ent.inode;
     }
 
-    return 0;
+    return inode;
 }
+
+// Split "/foo/bar.txt" => parent "/foo", name "bar.txt"
+static bool split_parent_child(const char* path,
+                               char* parent, size_t parent_cap,
+                               char* name, size_t name_cap) {
+    if (!path || path[0] != '/') return false;
+    size_t len = k_strlen(path);
+    if (len < 2) return false;
+
+    // find last '/'
+    size_t last_slash = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (path[i] == '/') last_slash = i;
+    }
+
+    if (last_slash == len - 1) {
+        // trailing slash: strip it and find again
+        // also fuck me in the ass im gonna kill myself
+        len--;
+        if (len < 2) return false;
+        last_slash = 0;
+        for (size_t i = 0; i < len; ++i) {
+            if (path[i] == '/') last_slash = i;
+        }
+    }
+
+    size_t parent_len = (last_slash == 0) ? 1 : last_slash;
+    size_t name_len   = len - last_slash - 1;
+
+    if (parent_len + 1 > parent_cap) return false;
+    if (name_len + 1 > name_cap) return false;
+
+    // parent
+    if (last_slash == 0) {
+        parent[0] = '/';
+        parent[1] = 0;
+    } else {
+        for (size_t i = 0; i < parent_len; ++i) parent[i] = path[i];
+        parent[parent_len] = 0;
+    }
+
+    // name
+    for (size_t i = 0; i < name_len; ++i) name[i] = path[last_slash + 1 + i];
+    name[name_len] = 0;
+    return true;
+}
+
+// --------------------------------------------------------
+// Public FFS API
+// --------------------------------------------------------
+
+namespace ffs {
+
+bool mount() {
+    uint8_t buffer[FFS_BLOCK_SIZE];
+    if (!ffs_read_block(0, buffer)) return false;
+    FFS_Superblock* sb = (FFS_Superblock*)buffer;
+
+    if (sb->magic[0] != 'F' || sb->magic[1] != 'F' ||
+        sb->magic[2] != 'S' || sb->magic[3] != '0') {
+        return false;
+    }
+
+    if (sb->block_size != FFS_BLOCK_SIZE) return false;
+    if (sb->total_blocks != FFS_TOTAL_BLOCKS) return false;
+
+    g_sb       = *sb;
+    g_mounted  = true;
+    return true;
+}
+
+bool format() {
+    // Build superblock
+    for (size_t i = 0; i < sizeof(g_sb); ++i) ((uint8_t*)&g_sb)[i] = 0;
+
+    g_sb.magic[0]        = 'F';
+    g_sb.magic[1]        = 'F';
+    g_sb.magic[2]        = '4';
+    g_sb.magic[3]        = '0';
+    g_sb.version         = 1;
+    g_sb.block_size      = FFS_BLOCK_SIZE;
+    g_sb.total_blocks    = FFS_TOTAL_BLOCKS;
+    g_sb.bitmap_start    = FFS_BITMAP_START;
+    g_sb.bitmap_blocks   = FFS_BITMAP_BLOCKS;
+    g_sb.inode_table_start = FFS_INODE_TABLE_START;
+    g_sb.inode_count     = FFS_INODE_COUNT;
+    g_sb.root_inode      = 1;
+
+    // write superblock
+    if (!ffs_write_block(0, &g_sb)) return false;
+
+    // clear bitmap and inode table blocks
+    uint8_t zero[FFS_BLOCK_SIZE];
+    for (uint32_t i = 0; i < FFS_BLOCK_SIZE; ++i) zero[i] = 0;
+
+    for (uint32_t b = FFS_BITMAP_START;
+         b < FFS_BITMAP_START + FFS_BITMAP_BLOCKS + FFS_INODE_TABLE_BLOCKS;
+         ++b) {
+        if (!ffs_write_block(b, zero)) return false;
+    }
+
+    // mark metadata blocks used in bitmap
+    for (uint32_t b = 0; b < FFS_DATA_START; ++b) {
+        bitmap_set(b, true);
+    }
+
+    // initialize root inode (1) as directory
+    FFS_Inode root;
+    root.type      = 2; // dir
+    root.flags     = 0;
+    root.reserved0 = 0;
+    root.size      = 0;
+    for (int i = 0; i < 8; ++i) {
+        root.extents[i].start_block = 0;
+        root.extents[i].block_count = 0;
+    }
+    for (size_t i = 0; i < sizeof(root.reserved); ++i) root.reserved[i] = 0;
+
+    if (!write_inode(1, &root)) return false;
+    if (!dir_init_dot_entries(1, 1)) return false;
+
+    g_mounted = true;
+    return true;
+}
+
+bool init() {
+    if (g_mounted) return true;
+    if (mount()) return true;
+    if (!format()) return false;
+    return mount();
+}
+
+uint32_t root_inode() {
+    return g_sb.root_inode;
+}
+
+uint64_t file_size(uint32_t inode) {    // dont change this shit again itll break ALL your shit, dumbass
+    FFS_Inode ino;
+    if (!read_inode(inode, &ino)) return 0;
+    return ino.size;
+}
+
+uint32_t lookup_path(const char* path) {
+    return walk_path(path);
+}
+
+int read_file(uint32_t inode_num, uint64_t offset, void* buffer, uint32_t length) {
+    if (!g_mounted) return -1;
+    if (length == 0) return 0;
+
+    FFS_Inode ino;
+    if (!read_inode(inode_num, &ino)) return -1;
+    if (ino.type != 1) return -1; // not a file
+
+    if (offset >= ino.size) return 0;
+
+    if (offset + length > ino.size) {
+        length = (uint32_t)(ino.size - offset);
+    }
+
+    if (ino.extents[0].start_block == 0 || ino.extents[0].block_count == 0) {
+        return 0;
+    }
+
+    if (offset >= FFS_BLOCK_SIZE) {
+        // we only support single-block small files
+        return 0;
+    }
+
+    uint8_t buf[FFS_BLOCK_SIZE];
+    if (!ffs_read_block(ino.extents[0].start_block, buf)) return -1;
+
+    if (offset + length > FFS_BLOCK_SIZE) {
+        length = FFS_BLOCK_SIZE - (uint32_t)offset;
+    }
+
+    for (uint32_t i = 0; i < length; ++i) {
+        ((uint8_t*)buffer)[i] = buf[(uint32_t)offset + i];
+    }
+
+    return (int)length;
+}
+
+int write_file(uint32_t inode_num, uint64_t offset, const void* buffer, uint32_t length) {
+    if (!g_mounted) return -1;
+    if (length == 0) return 0;
+
+    if (offset >= FFS_BLOCK_SIZE) {
+        // no multi-block support
+        return -1;
+    }
+
+    if (offset + length > FFS_BLOCK_SIZE) {
+        length = FFS_BLOCK_SIZE - (uint32_t)offset;
+    }
+
+    FFS_Inode ino;
+    if (!read_inode(inode_num, &ino)) return -1;
+    if (ino.type != 1) return -1; // not a file
+
+    if (ino.extents[0].start_block == 0 || ino.extents[0].block_count == 0) {
+        int b = alloc_block();
+        if (b < 0) return -1;
+        ino.extents[0].start_block = (uint32_t)b;
+        ino.extents[0].block_count = 1;
+        ino.size = 0;
+    }
+
+    uint8_t buf[FFS_BLOCK_SIZE];
+    if (!ffs_read_block(ino.extents[0].start_block, buf)) return -1;
+
+    for (uint32_t i = 0; i < length; ++i) {
+        buf[(uint32_t)offset + i] = ((const uint8_t*)buffer)[i];
+    }
+
+    if (!ffs_write_block(ino.extents[0].start_block, buf)) return -1;
+
+    uint64_t end = offset + length;
+    if (end > ino.size) ino.size = end;
+    if (!write_inode(inode_num, &ino)) return -1;
+
+    return (int)length;
+}
+
+bool list_dir(uint32_t inode_num, void (*callback)(const FFS_DirEntry&)) {
+    if (!g_mounted) return false;
+    if (!callback) return false;
+
+    FFS_Inode dir_ino;
+    uint8_t   buf[FFS_BLOCK_SIZE];
+    if (!dir_load_block(inode_num, &dir_ino, buf)) return false;
+
+    FFS_DirEntry* ents = (FFS_DirEntry*)buf;
+    for (int i = 0; i < FFS_DIRENTRIES_PER_BLOCK; ++i) {
+        if (ents[i].inode == 0 || ents[i].name_len == 0) continue;
+        callback(ents[i]);
+        // fuck im gonna kill myself
+    }
+    return true;
+}
+
+bool create_dir(const char* path) {
+    if (!g_mounted) return false;
+    if (!path || path[0] != '/') return false;
+
+    char parent[256];
+    char name[56];
+    if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
+
+    uint32_t parent_inode = walk_path(parent);
+    if (parent_inode == 0) return false;
+
+    // already exists?
+    FFS_DirEntry dummy;
+    if (dir_find_entry(parent_inode, name, k_strlen(name), &dummy)) {
+        return false;
+    }
+
+    uint32_t inode_num = alloc_inode();
+    if (inode_num == 0) return false;
+
+    FFS_Inode ino;
+    if (!read_inode(inode_num, &ino)) return false;
+    ino.type  = 2;
+    ino.flags = 0;
+    ino.size  = 0;
+    if (!write_inode(inode_num, &ino)) return false;
+
+    if (!dir_init_dot_entries(inode_num, parent_inode)) return false;
+
+    if (!dir_add_entry(parent_inode, inode_num, 2, name, k_strlen(name))) return false;
+
+    return true;
+}
+
+bool create_file(const char* path) {
+    if (!g_mounted) return false;
+    if (!path || path[0] != '/') return false;
+
+    char parent[256];
+    char name[56];
+    if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
+
+    uint32_t parent_inode = walk_path(parent);
+    if (parent_inode == 0) return false;
+
+    // already exists?
+    FFS_DirEntry dummy;
+    if (dir_find_entry(parent_inode, name, k_strlen(name), &dummy)) {
+        return false;
+    }
+
+    uint32_t inode_num = alloc_inode();
+    if (inode_num == 0) return false;
+
+    FFS_Inode ino;
+    if (!read_inode(inode_num, &ino)) return false;
+    ino.type  = 1; // file
+    ino.flags = 0;
+    ino.size  = 0;
+    // no data blocks yet
+    if (!write_inode(inode_num, &ino)) return false;
+
+    if (!dir_add_entry(parent_inode, inode_num, 1, name, k_strlen(name))) return false;
+    return true;
+}
+
+bool remove_path(const char* path) {
+    if (!g_mounted) return false;
+    if (!path || path[0] != '/') return false;
+
+    char parent[256];
+    char name[56];
+    if (!split_parent_child(path, parent, sizeof(parent), name, sizeof(name))) return false;
+
+    uint32_t parent_inode = walk_path(parent);
+    if (parent_inode == 0) return false;
+
+    uint32_t target_inode = walk_path(path);
+    if (target_inode == 0) return false;
+
+    FFS_Inode ino;
+    if (!read_inode(target_inode, &ino)) return false;
+
+    if (ino.type == 2) {
+        // directory: must be empty except . and ..
+        if (!dir_is_empty_except_dots(target_inode)) return false;
+    }
+
+    // free file data blocks (only first extent)
+    if (ino.type == 1 && ino.extents[0].start_block != 0) {
+        free_block(ino.extents[0].start_block);
+        ino.extents[0].start_block = 0;
+        ino.extents[0].block_count = 0;
+    }
+
+    // mark inode free
+    ino.type = 0;
+    ino.size = 0;
+    if (!write_inode(target_inode, &ino)) return false;
+
+    // remove from parent dir
+    if (!dir_remove_entry(parent_inode, name, k_strlen(name))) return false;
+
+    return true;
+}
+
+} // namespace ffs

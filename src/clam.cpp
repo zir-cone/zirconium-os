@@ -51,6 +51,8 @@ static uint32_t g_cwd_inode = 0;
 static char     g_cwd_path[256] = "/";
 static bool     g_ffs_ready = false;
 
+static const char* HOME_PATH = "/Users/default";
+
 // ------------ console helpers ------------
 
 static void print(const char* s) {
@@ -105,36 +107,146 @@ static void read_line(char* buf, size_t max_len) {
     }
 }
 
-// ------------ path resolution ------------
+// ------------ path resolution (., .., ~, Z:/) ------------
 
-// absolute if starting with '/', otherwise relative to g_cwd_path
+static bool is_alpha(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+// Build a canonical absolute path into out ("/foo/bar").
+// Supports:
+//   . and ..
+//   ~ or ~/ -> /Users/default
+//   Z:/foo/bar -> /foo/bar
 static bool resolve_path(const char* input, char* out, size_t out_cap) {
     if (!input || !out || out_cap == 0) return false;
 
-    // Absolute
-    if (input[0] == '/') {
-        size_t len = k_strlen(input);
-        if (len + 1 > out_cap) return false;
-        for (size_t i = 0; i <= len; ++i) out[i] = input[i];
+    char combined[256];
+    combined[0] = 0;
+
+    const char* p = input;
+
+    // Strip leading spaces
+    while (*p == ' ' || *p == '\t') ++p;
+
+    // 1) Tilde: ~ or ~/
+    if (*p == '~' && (p[1] == 0 || p[1] == '/' || p[1] == '\\')) {
+        const char* rest = p + 1;
+        if (*rest == '/' || *rest == '\\') ++rest;
+
+        size_t home_len = k_strlen(HOME_PATH);
+        size_t rest_len = k_strlen(rest);
+        if (home_len + 1 + rest_len + 1 > sizeof(combined)) return false;
+
+        size_t pos = 0;
+        for (size_t i = 0; i < home_len; ++i) combined[pos++] = HOME_PATH[i];
+        if (rest_len > 0 && combined[home_len - 1] != '/') {
+            combined[pos++] = '/';
+        }
+        for (size_t i = 0; i < rest_len; ++i) combined[pos++] = rest[i];
+        combined[pos] = 0;
+    }
+    // 2) Windows-style drive: Z:/foo/bar
+    else if (is_alpha(p[0]) && p[1] == ':' && (p[2] == '/' || p[2] == '\\')) {
+        const char* rest = p + 3;
+        size_t rest_len = k_strlen(rest);
+        if (1 + rest_len + 1 > sizeof(combined)) return false;
+
+        size_t pos = 0;
+        combined[pos++] = '/';
+        for (size_t i = 0; i < rest_len; ++i) combined[pos++] = rest[i];
+        combined[pos] = 0;
+    }
+    // 3) Already absolute: /foo/bar
+    else if (*p == '/') {
+        size_t len = k_strlen(p);
+        if (len + 1 > sizeof(combined)) return false;
+        for (size_t i = 0; i <= len; ++i) combined[i] = p[i];
+    }
+    // 4) Relative: cwd + "/" + input
+    else {
+        size_t cwd_len   = k_strlen(g_cwd_path);
+        size_t rel_len   = k_strlen(p);
+        bool   root_cwd  = (cwd_len == 1 && g_cwd_path[0] == '/');
+
+        size_t need = (root_cwd ? 1 : cwd_len + 1) + rel_len + 1;
+        if (need > sizeof(combined)) return false;
+
+        size_t pos = 0;
+        if (root_cwd) {
+            combined[pos++] = '/';
+        } else {
+            for (size_t i = 0; i < cwd_len; ++i) combined[pos++] = g_cwd_path[i];
+            combined[pos++] = '/';
+        }
+        for (size_t i = 0; i < rel_len; ++i) combined[pos++] = p[i];
+        combined[pos] = 0;
+    }
+
+    // Canonicalize: split into segments, process . and ..
+    const char* q = combined;
+    // ensure it starts with '/'
+    if (*q != '/') {
+        // shouldn't happen, but be safe
+        out[0] = '/';
+        out[1] = 0;
         return true;
     }
 
-    // Relative
-    size_t cwd_len = k_strlen(g_cwd_path);
-    size_t in_len  = k_strlen(input);
+    // skip leading '/'
+    while (*q == '/') ++q;
 
-    bool root = (cwd_len == 1 && g_cwd_path[0] == '/');
-    size_t need = (root ? 1 : cwd_len + 1) + in_len + 1;
-    if (need > out_cap) return false;
+    const char* seg_start[32];
+    int         seg_len[32];
+    int         seg_count = 0;
 
-    size_t pos = 0;
-    if (root) {
-        out[pos++] = '/';
-    } else {
-        for (size_t i = 0; i < cwd_len; ++i) out[pos++] = g_cwd_path[i];
-        out[pos++] = '/';
+    while (*q) {
+        while (*q == '/') ++q;
+        if (*q == 0) break;
+
+        const char* start = q;
+        int len = 0;
+        while (*q && *q != '/') {
+            ++q; ++len;
+        }
+
+        if (len == 0) continue;
+
+        // "."
+        if (len == 1 && start[0] == '.') {
+            continue;
+        }
+        // ".."
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            if (seg_count > 0) --seg_count;
+            continue;
+        }
+
+        if (seg_count < 32) {
+            seg_start[seg_count] = start;
+            seg_len[seg_count]   = len;
+            ++seg_count;
+        } else {
+            return false;
+        }
     }
-    for (size_t i = 0; i < in_len; ++i) out[pos++] = input[i];
+
+    // Build output
+    size_t pos = 0;
+    if (seg_count == 0) {
+        if (out_cap < 2) return false;
+        out[0] = '/';
+        out[1] = 0;
+        return true;
+    }
+
+    for (int i = 0; i < seg_count; ++i) {
+        if (pos + 1 + (size_t)seg_len[i] + 1 > out_cap) return false;
+        out[pos++] = '/';
+        for (int j = 0; j < seg_len[i]; ++j) {
+            out[pos++] = seg_start[i][j];
+        }
+    }
     out[pos] = 0;
     return true;
 }
@@ -226,7 +338,7 @@ static void handle_SAY(const char* args) {
         return;
     }
 
-    // $-strings (for now just treat like normal)
+    // $-strings (basic version)
     if (args[0] == '$' && args[1] == '"') {
         char out[256];
         const char* p = args + 2;
@@ -278,7 +390,17 @@ static void handle_LDIR(const char* args) {
     }
 
     auto cb = [](const FFS_DirEntry& e) {
-        console_write(e.name);
+        // Skip . and ..
+        if (e.name_len == 1 && e.name[0] == '.') return;
+        if (e.name_len == 2 && e.name[0] == '.' && e.name[1] == '.') return;
+
+        // name[] may not be null-terminated, use name_len
+        char name[57];
+        size_t len = (e.name_len < 56) ? e.name_len : 56;
+        for (size_t i = 0; i < len; ++i) name[i] = e.name[i];
+        name[len] = 0;
+
+        console_write(name);
         console_write("\n");
     };
 
@@ -338,25 +460,14 @@ static void handle_MAKE(const char* args) {
         return;
     }
 
-    char name[128];
-    size_t i = 0;
-    while (args[i] && args[i] != ' ' && args[i] != '\t' && i + 1 < sizeof(name)) {
-        name[i] = args[i];
-        ++i;
-    }
-    name[i] = 0;
-
-    bool is_dir = false;
-    size_t len = k_strlen(name);
-    if (len > 0 && name[len - 1] == '/') {
-        is_dir = true;
-    }
-
     char resolved[256];
-    if (!resolve_path(name, resolved, sizeof(resolved))) {
+    if (!resolve_path(args, resolved, sizeof(resolved))) {
         println("Error: path too long");
         return;
     }
+
+    size_t len = k_strlen(resolved);
+    bool is_dir = (len > 0 && resolved[len - 1] == '/');
 
     bool ok = false;
     if (is_dir) ok = ffs::create_dir(resolved);
@@ -475,10 +586,11 @@ static void cmd_help() {
     println("  SAY --whats-inside <path>");
     println("  LDIR [path]");
     println("  CDIR <path>");
-    println("  MAKE <name|dir/>");
+    println("  MAKE <file|dir/>");
     println("  REMOVE <path>");
     println("  CONCAT \"text\" TO <file>");
     println("  CONCAT \"text\" AS <file>");
+    println("Path features: '.', '..', '~' -> /Users/default, and Z:/foo maps to /foo.");
 }
 
 // ------------ command dispatcher ------------
@@ -521,7 +633,7 @@ static void execute_line(const char* line) {
 // ------------ public API ------------
 
 void init() {
-    // kernel already called ffs::init(), but we can sanity check
+    // kernel should already have called ffs::init()
     g_cwd_path[0] = '/';
     g_cwd_path[1] = 0;
 
