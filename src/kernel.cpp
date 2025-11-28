@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include "interrupts.h"
 #include "keyboard.h"
+#include "fourty/ffs.h"
+#include "fourty/block_device.h"
 
 static const int VGA_WIDTH  = 80;
 static const int VGA_HEIGHT = 25;
@@ -75,6 +77,12 @@ extern "C" void kernel_main() {
     asm volatile("sti"); // enable interrupts
     console_write("Keyboard enabled.\n");
     console_write("Type something dumbass.\n\n> ");
+
+    if (!ffs::init()) {
+        console_write("FFS init failed.\n");
+    } else {
+        console_write("FFS initialized.\n");
+    }
 
     char buffer[80];
     size_t len = 0;

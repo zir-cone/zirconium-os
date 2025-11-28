@@ -6,7 +6,8 @@ LD = ld
 CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-rtti
 LDFLAGS = -melf_i386 -T linker.ld -nostdlib
 
-OBJS = src/boot.o src/interrupts_asm.o src/kernel.o src/interrupts.o src/keyboard.o
+OBJS = src/boot.o src/interrupts_asm.o src/interrupts.o src/keyboard.o src/kernel.o src/fourty/block_device.o src/fourty/ffs.o
+
 
 all: ZirconiumOS.iso
 
@@ -23,6 +24,12 @@ src/interrupts.o: src/interrupts.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
 
 src/keyboard.o: src/keyboard.cpp
+	$(CXX) $(CFLAGS) -c $< -o $@
+
+src/fourty/block_device.o: src/fourty/block_device.cpp
+	$(CXX) $(CFLAGS) -c $< -o $@
+
+src/fourty/ffs.o: src/fourty/ffs.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
 
 kernel.elf: $(OBJS)
