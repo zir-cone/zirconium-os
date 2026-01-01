@@ -40,9 +40,6 @@ extern "C" void kernel_main() {
 
     clam::init();
     clam::repl();
-    // one of these days "67" is gonna pop up in this kernel and im gonna comment
-    // "SIX SEVEN!!??? 😭😭🥀🥀💔" next to it or something at 5:20 am with no sleep
-    // for the past six months because my humor is broken.
     char buffer[80];
     size_t len = 0;
 

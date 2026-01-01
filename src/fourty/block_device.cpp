@@ -1,13 +1,5 @@
 // src/fourty/block_device.cpp
 
-// dude after finishing this if im ever drafted
-// into war, and the enemy captures me,
-// they aint getting shit outta my mouth
-// cuz no torture methods they have are
-// gonna be more painful than this FUCKING SHIT
-// FUCK YOU COMPAQ AND WESTERN FUCKING DIGITAL!!!
-// id actually rather make my own chips than
-// do this bullshit again.
 #include "block_device.h"
 #include "../ports.h"
 #include <stdint.h>
@@ -120,8 +112,6 @@ static bool ata_read_sector(uint32_t lba, void* buffer) {
 
     return true;
 }
-
-// You just popped in to Kanye West "Get Right for the Summer" Workout Tape...
 
 static bool ata_write_sector(uint32_t lba, const void* buffer) {
     if (!ata_wait_not_busy()) return false;

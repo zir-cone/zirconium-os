@@ -3,7 +3,7 @@
 #pragma once
 #include <stdint.h>
 
-// Block size is fixed at 4096 bytes for FFS 1.0
+// Block size is fixed at 4096 bytes for FFS 2.0
 static const uint32_t BD_BLOCK_SIZE = 4096;
 // init block deive (eg detect ATA disk, etc)
 bool bd_init();

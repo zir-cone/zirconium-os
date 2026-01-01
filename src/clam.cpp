@@ -258,6 +258,41 @@ static bool is_dir_inode(uint32_t inode) {
     return ffs::list_dir(inode, noop_dir_callback);
 }
 
+static bool read_file_to_console(const char* path) {
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return false;
+    }
+
+    char resolved[256];
+    if (!resolve_path(path, resolved, sizeof(resolved))) {
+        println("Error: path too long");
+        return false;
+    }
+
+    uint32_t inode = ffs::lookup_path(resolved);
+    if (inode == 0) {
+        println("Error: file not found");
+        return false;
+    }
+
+    char buf[256];
+    uint64_t offset = 0;
+    while (true) {
+        int n = ffs::read_file(inode, offset, buf, sizeof(buf) - 1);
+        if (n <= 0) break;
+        buf[n] = 0;
+        print(buf);
+        offset += (uint64_t)n;
+        if (offset > 64 * 1024) {
+            println("\n[... truncated ...]");
+            break;
+        }
+    }
+    println("");
+    return true;
+}
+
 // ------------ SAY command ------------
 
 static void handle_SAY(const char* args) {
@@ -293,35 +328,7 @@ static void handle_SAY(const char* args) {
             println("Error: SAY --whats-inside requires a path");
             return;
         }
-        if (!g_ffs_ready) {
-            println("Error: FFS not ready");
-            return;
-        }
-        char resolved[256];
-        if (!resolve_path(p, resolved, sizeof(resolved))) {
-            println("Error: path too long");
-            return;
-        }
-        uint32_t inode = ffs::lookup_path(resolved);
-        if (inode == 0) {
-            println("Error: file not found");
-            return;
-        }
-
-        char buf[256];
-        uint64_t offset = 0;
-        while (true) {
-            int n = ffs::read_file(inode, offset, buf, sizeof(buf) - 1);
-            if (n <= 0) break;
-            buf[n] = 0;
-            print(buf);
-            offset += (uint64_t)n;
-            if (offset > 4096) {
-                println("\n[... truncated ...]");
-                break;
-            }
-        }
-        println("");
+        read_file_to_console(p);
         return;
     }
 
@@ -502,6 +509,103 @@ static void handle_REMOVE(const char* args) {
     }
 }
 
+// ------------ READ ------------
+
+static void handle_READ(const char* args) {
+    while (*args == ' ' || *args == '\t') ++args;
+    if (*args == 0) {
+        println("Error: READ requires a path");
+        return;
+    }
+
+    read_file_to_console(args);
+}
+
+// ------------ WRITE ------------
+
+static void handle_WRITE(const char* args) {
+    while (*args == ' ' || *args == '\t') ++args;
+    if (!g_ffs_ready) {
+        println("Error: FFS not ready");
+        return;
+    }
+    if (*args == 0) {
+        println("Error: WRITE requires a path");
+        return;
+    }
+
+    char path[256];
+    size_t p = 0;
+    while (*args && *args != ' ' && *args != '\t' && p + 1 < sizeof(path)) {
+        path[p++] = *args++;
+    }
+    path[p] = 0;
+
+    while (*args == ' ' || *args == '\t') ++args;
+    if (*args != '\"') {
+        println("Error: WRITE expects a quoted string");
+        return;
+    }
+
+    char text[256];
+    const char* t = args + 1;
+    size_t len = 0;
+    while (*t && *t != '\"' && len + 1 < sizeof(text)) {
+        text[len++] = *t++;
+    }
+    text[len] = 0;
+    if (*t != '\"') {
+        println("Error: unterminated string in WRITE");
+        return;
+    }
+    ++t;
+
+    while (*t == ' ' || *t == '\t') ++t;
+    bool append = false;
+    if (*t != 0) {
+        if ((t[0] == 'A' || t[0] == 'a') &&
+            (t[1] == 'P' || t[1] == 'p') &&
+            (t[2] == 'P' || t[2] == 'p') &&
+            (t[3] == 'E' || t[3] == 'e') &&
+            (t[4] == 'N' || t[4] == 'n') &&
+            (t[5] == 'D' || t[5] == 'd') &&
+            (t[6] == 0 || t[6] == ' ' || t[6] == '\t')) {
+            append = true;
+        } else {
+            println("Error: WRITE only accepts APPEND as an optional flag");
+            return;
+        }
+    }
+
+    char resolved[256];
+    if (!resolve_path(path, resolved, sizeof(resolved))) {
+        println("Error: path too long");
+        return;
+    }
+
+    uint32_t inode = ffs::lookup_path(resolved);
+    if (inode == 0) {
+        if (!ffs::create_file(resolved)) {
+            println("Error: failed to create target file");
+            return;
+        }
+        inode = ffs::lookup_path(resolved);
+        if (inode == 0) {
+            println("Error: internal error after CREATE");
+            return;
+        }
+    }
+
+    uint64_t offset = 0;
+    if (append) {
+        offset = ffs::file_size(inode);
+    }
+
+    if (ffs::write_file(inode, offset, text, (uint32_t)len) < 0) {
+        println("Error: write failed");
+    }
+}
+
 // ------------ CONCAT ------------
 
 static void handle_CONCAT(const char* args) {
@@ -588,6 +692,8 @@ static void cmd_help() {
     println("  CDIR <path>");
     println("  MAKE <file|dir/>");
     println("  REMOVE <path>");
+    println("  READ <path>");
+    println("  WRITE <path> \"text\" [APPEND]");
     println("  CONCAT \"text\" TO <file>");
     println("  CONCAT \"text\" AS <file>");
     println("Path features: '.', '..', '~' -> /Users/default, and Z:/foo maps to /foo.");
@@ -622,6 +728,10 @@ static void execute_line(const char* line) {
         handle_MAKE(args);
     } else if (k_streq_nocase(cmd, "REMOVE")) {
         handle_REMOVE(args);
+    } else if (k_streq_nocase(cmd, "READ")) {
+        handle_READ(args);
+    } else if (k_streq_nocase(cmd, "WRITE")) {
+        handle_WRITE(args);
     } else if (k_streq_nocase(cmd, "CONCAT")) {
         handle_CONCAT(args);
     } else {
