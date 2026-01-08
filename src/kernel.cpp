@@ -5,11 +5,7 @@
 #include "keyboard.h"
 #include "fourty/ffs.h"
 #include "fourty/block_device.h"
-<<<<<<< HEAD
-#include "clam.h"
-=======
 #include "clamshell/clamshell.h"
->>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e
 #include "console.h"
 
 static const int VGA_WIDTH  = 80;
@@ -42,16 +38,8 @@ extern "C" void kernel_main() {
         console_write("FFS initialized.\n");
     }
 
-<<<<<<< HEAD
-    clam::init();
-    clam::repl();
-    // one of these days "67" is gonna pop up in this kernel and im gonna comment
-    // "SIX SEVEN!!??? 😭😭🥀🥀💔" next to it or something at 5:20 am with no sleep
-    // for the past six months because my humor is broken.
-=======
     clamshell::init();
     clamshell::repl();
->>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e
     char buffer[80];
     size_t len = 0;
 
@@ -84,8 +72,4 @@ extern "C" void kernel_main() {
             }
         }
     }
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e

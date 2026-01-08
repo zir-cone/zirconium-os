@@ -4,11 +4,7 @@
 .set MULTIBOOT_FLAGS,    0x00000000
 .set MULTIBOOT_CHECKSUM, -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
 
-<<<<<<< HEAD
-/* multiboot header: must be in a loadable segment, in the first 8 KiB */
-=======
 /* Multiboot header: must be in a loadable segment, in the first 8 KiB */
->>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e
     .section .multiboot
     .align 4
     .long MULTIBOOT_MAGIC

@@ -728,8 +728,4 @@ bool remove_path(const char* path) {
     return true;
 }
 
-<<<<<<< HEAD
 } // namespace ffs
-=======
-} // namespace ffs
->>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e
