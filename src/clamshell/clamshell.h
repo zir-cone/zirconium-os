@@ -1,10 +1,10 @@
-// src/clam.h
+// src/clamshell/clamshell.h
 #pragma once
 
-namespace clam
+namespace clamshell
 {
     // init clamshell/clamlang
     void init();
     // start interactive repl
     void repl();
-} // namespace clam
+} // namespace clamshell

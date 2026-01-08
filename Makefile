@@ -6,7 +6,7 @@ LD = ld
 CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-rtti
 LDFLAGS = -melf_i386 -T linker.ld -nostdlib
 
-OBJS = src/boot.o src/interrupts_asm.o src/interrupts.o src/keyboard.o src/kernel.o src/fourty/block_device.o src/fourty/ffs_core.o src/fourty/ffs.o src/clam.o src/ccl.o src/console.o
+OBJS = src/boot.o src/interrupts_asm.o src/interrupts.o src/keyboard.o src/kernel.o src/fourty/block_device.o src/fourty/ffs_core.o src/fourty/ffs.o src/clamshell/clamshell.o src/clamlang/ccl_new/ccl.o src/console.o
 
 
 all: ZirconiumOS.iso
@@ -35,10 +35,10 @@ src/fourty/ffs.o: src/fourty/ffs.cpp
 src/fourty/ffs_core.o: src/fourty/ffs_core.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-src/clam.o: src/clam.cpp
+src/clamshell/clamshell.o: src/clamshell/clamshell.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
 
-src/ccl.o: src/ccl.c
+src/clamlang/ccl_new/ccl.o: src/clamlang/ccl_new/ccl.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 src/console.o: src/console.cpp

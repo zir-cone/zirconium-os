@@ -1,5 +1,5 @@
-// src/clam.cpp
-#include "clam.h"
+// src/clamshell/clamshell.cpp
+#include "clamshell.h"
 #include "fourty/ffs.h"
 #include "console.h"
 #include "ports.h"
@@ -45,7 +45,7 @@ static void k_strcpy(char* dst, const char* src) {
 
 // ------------ Clam state ------------
 
-namespace clam {
+namespace clamshell {
 
 static uint32_t g_cwd_inode = 0;
 static char     g_cwd_path[256] = "/";
@@ -769,4 +769,4 @@ void repl() {
     }
 }
 
-} // namespace clam
+} // namespace clamshell

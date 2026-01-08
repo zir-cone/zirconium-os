@@ -5,7 +5,7 @@
 #include "keyboard.h"
 #include "fourty/ffs.h"
 #include "fourty/block_device.h"
-#include "clam.h"
+#include "clamshell/clamshell.h"
 #include "console.h"
 
 static const int VGA_WIDTH  = 80;
@@ -38,8 +38,8 @@ extern "C" void kernel_main() {
         console_write("FFS initialized.\n");
     }
 
-    clam::init();
-    clam::repl();
+    clamshell::init();
+    clamshell::repl();
     char buffer[80];
     size_t len = 0;
 
