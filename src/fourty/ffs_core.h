@@ -11,4 +11,8 @@ void ffs_memcpy(void* dst, const void* src, uint64_t bytes);
 
 #ifdef __cplusplus
 }
+<<<<<<< HEAD
 #endif
+=======
+#endif
+>>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e

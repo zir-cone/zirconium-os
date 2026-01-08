@@ -256,4 +256,8 @@ bool bd_write_block(uint32_t block_lba, const void* buffer) {
 // and blessed is the fruit of thy womb, Jesus.
 // Holy Mary, Mother of God, pray for us sinners,
 // now and at the hour of our death.
+<<<<<<< HEAD
 // Amen.
+=======
+// Amen.
+>>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e

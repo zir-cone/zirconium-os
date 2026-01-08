@@ -21,4 +21,8 @@ void ffs_memcpy(void* dst, const void* src, uint64_t bytes) {
     for (uint64_t i = 0; i < bytes; ++i) {
         d[i] = s[i];
     }
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 6f01370f08b307819c9bd57b453eedf4d2977a6e
