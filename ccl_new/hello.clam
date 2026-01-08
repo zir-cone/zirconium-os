@@ -1,0 +1,16 @@
+DEFINE FUNCTION add(a->int, b->int) >> int {
+    RETURN a+b;
+}
+
+DEFINE FUNCTION sum(nums->list) >> int {
+    FOR (LET i -> int = 0; WITHIN LENGTH(nums); i++) {
+        IF (i == 0) {
+            SLET sum_nums -> int = nums[0];
+        } ELSE {
+            SLET sum_nums = add(sum_nums, nums[i]);
+        }
+    }
+    RETURN sum_nums;
+}
+
+SAY(sum([1,2,3,4]));
