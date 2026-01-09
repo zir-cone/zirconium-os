@@ -1,12 +1,13 @@
-CC = gcc
+CC  = gcc
 CXX = g++
-AS = gcc
-LD = ld
+AS  = gcc
+LD  = $(CC)
 
-CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-rtti
-LDFLAGS = -melf_i386 -T linker.ld -nostdlib
+CFLAGS   = -m32 -ffreestanding -O2 -Wall -Wextra
+CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
+LDFLAGS = -m32 -T linker.ld -nostdlib
 
-OBJS = src/boot.o src/interrupts_asm.o src/kernel.o src/interrupts.o src/keyboard.o
+OBJS = src/boot.o src/interrupts_asm.o src/interrupts.o src/keyboard.o src/kernel.o src/fourty/block_device.o src/fourty/ffs_core.o src/fourty/ffs.o src/clamshell/clamshell.o src/clamlang/ccl_new/ccl.o src/console.o
 
 all: ZirconiumOS.iso
 
@@ -14,16 +15,34 @@ src/boot.o: src/boot.s
 	$(AS) $(CFLAGS) -c $< -o $@
 
 src/kernel.o: src/kernel.cpp
-	$(CXX) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 src/interrupts_asm.o: src/interrupts.s
 	$(AS) $(CFLAGS) -c $< -o $@
 
 src/interrupts.o: src/interrupts.cpp
-	$(CXX) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 src/keyboard.o: src/keyboard.cpp
-	$(CXX) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/fourty/block_device.o: src/fourty/block_device.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/fourty/ffs.o: src/fourty/ffs.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/fourty/ffs_core.o: src/fourty/ffs_core.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+src/clamshell/clamshell.o: src/clamshell/clamshell.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/clamlang/ccl_new/ccl.o: src/clamlang/ccl_new/ccl.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+src/console.o: src/console.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 kernel.elf: $(OBJS)
 	$(LD) $(LDFLAGS) -o $@ $(OBJS)

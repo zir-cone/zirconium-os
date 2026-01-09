@@ -1,22 +1,33 @@
 /* linker.ld */
-ENTRY(start)
 
-SECTIONS {
+ENTRY(_start)
+OUTPUT_FORMAT(elf32-i386)
+OUTPUT_ARCH(i386)
+
+SECTIONS
+{
+    /* Load kernel at 1 MiB */
     . = 1M;
 
-    .multiboot : {
+    /* Put multiboot header at the very start of the text segment */
+    .text :
+    {
         *(.multiboot)
-    }
-    .text : {
         *(.text*)
     }
-    .rodata : {
+
+    .rodata :
+    {
         *(.rodata*)
     }
-    .data : {
+
+    .data :
+    {
         *(.data*)
     }
-    .bss : {
+
+    .bss :
+    {
         *(.bss*)
         *(COMMON)
     }

@@ -1,30 +1,36 @@
 /* src/boot.s */
 
-.set MULTIBOOT_MAGIC, 0x1BADB002
-.set MULTIBOOT_FLAGS, 0x0
+.set MULTIBOOT_MAGIC,    0x1BADB002
+.set MULTIBOOT_FLAGS,    0x00000000
 .set MULTIBOOT_CHECKSUM, -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
 
-.section .MULTIBOOT_CHECKSUM
+/* Multiboot header: must be in a loadable segment, in the first 8 KiB */
+    .section .multiboot
     .align 4
     .long MULTIBOOT_MAGIC
     .long MULTIBOOT_FLAGS
     .long MULTIBOOT_CHECKSUM
 
-.section .bss
-    .align 16
-stack_bottom:
-    .skip 16385 /* 16 KB stack */
-stack_top:
+    .section .text
+    .globl _start
+    .extern kernel_main
 
-.section .text
-    .global start
+_start:
+    cli
 
-start:
-    mov $stack_top, %esp /* set stack pointer */
+    /* set up stack */
+    mov $stack_top, %esp
 
-    call kernel_main /* call into C++ */
+    /* call C++ kernel entry */
+    call kernel_main
 
-hang:
+.hang:
     cli
     hlt
-    jmp hang /* jmp or hang urself */
+    jmp .hang
+
+    .section .bss
+    .align 16
+stack_bottom:
+    .skip 16384        /* 16 KiB stack */
+stack_top:

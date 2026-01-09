@@ -3,6 +3,10 @@
 #include <stddef.h>
 #include "interrupts.h"
 #include "keyboard.h"
+#include "fourty/ffs.h"
+#include "fourty/block_device.h"
+#include "clamshell/clamshell.h"
+#include "console.h"
 
 static const int VGA_WIDTH  = 80;
 static const int VGA_HEIGHT = 25;
@@ -17,65 +21,25 @@ static inline uint16_t vga_entry(char c, uint8_t color) {
     return ((uint16_t)color << 8) | (uint8_t)c;
 }
 
-static void console_initialize() {
-    terminal_row    = 0;
-    terminal_column = 0;
-    terminal_color  = 0x0F;  // white on black
-    terminal_buffer = VGA_MEMORY;
-
-    for (size_t y = 0; y < VGA_HEIGHT; ++y) {
-        for (size_t x = 0; x < VGA_WIDTH; ++x) {
-            terminal_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
-        }
-    }
-}
-
-static void console_putc(char c) {
-    if (c == '\n') {
-        terminal_column = 0;
-        if (++terminal_row >= VGA_HEIGHT) {
-            terminal_row = 0;
-        }
-        return;
-    }
-
-    if (c == '\b') {
-        if (terminal_column > 0) {
-            --terminal_column;
-            terminal_buffer[terminal_row * VGA_WIDTH + terminal_column] =
-                vga_entry(' ', terminal_color);
-        }
-        return;
-    }
-
-    terminal_buffer[terminal_row * VGA_WIDTH + terminal_column] =
-        vga_entry(c, terminal_color);
-
-    if (++terminal_column >= VGA_WIDTH) {
-        terminal_column = 0;
-        if (++terminal_row >= VGA_HEIGHT) {
-            terminal_row = 0;
-        }
-    }
-}
-
-static void console_write(const char* str) {
-    for (size_t i = 0; str[i] != 0; ++i) {
-        console_putc(str[i]);
-    }
-}
-
 extern "C" void kernel_main() {
     console_initialize();
-    console_write("Zirkernel starting...\n");
+    console_write("ZirconiumOS kernel starting...\n");
 
     idt_init();
     console_write("IDT installed.\nPIC remapped.\n");
 
     asm volatile("sti"); // enable interrupts
     console_write("Keyboard enabled.\n");
-    console_write("Type something dumbass.\n\n> ");
+    console_write("\n> ");
 
+    if (!ffs::init()) {
+        console_write("FFS init failed.\n");
+    } else {
+        console_write("FFS initialized.\n");
+    }
+
+    clamshell::init();
+    clamshell::repl();
     char buffer[80];
     size_t len = 0;
 
@@ -97,10 +61,10 @@ extern "C" void kernel_main() {
 
             len = 0;
         } else if (c == '\b') {
-            if (len > 0) {
+            if (len > -1) {
                 --len;
                 console_putc('\b');
-            }
+            } // is that.... SIX SEVEN?!?!?!?!?!?!!!?????? 😱😱😱😱🔥‼️‼️‼️🔥🔥🚨🚨🚨🔥🔥‼️‼️🗣️🗣️🗣️🧯💯💯💯🥀🥀🥀🥀🥀🥀🥀🥀
         } else {
             if (len < sizeof(buffer) - 1) {
                 buffer[len++] = c;

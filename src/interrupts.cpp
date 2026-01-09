@@ -45,37 +45,26 @@ static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags
 
 static void pic_remap() 
 {
-    uint8_t a1 = inb(0x21); // save masks
-    uint8_t a2 = inb(0xA1);
-
     outb(0x20, 0x11);
-    io_wait();
     outb(0xA0, 0x11);
-    io_wait();
-
-    outb(0x21, 0x20); // master offset 0x20
-    io_wait();
-    outb(0xA1, 0x28); // slave offset 0x28
-    io_wait();
-
-    outb(0x21, 0x04);
-    io_wait();
-    outb(0xA1, 0x02);
-    io_wait();
-
+    outb(0x21, 0x20); // master
+    outb(0xA1, 0x28); // slave
+    outb(0x21, 0x04); // tell master about slave at IRQ2
+    outb(0xA1, 0x02); // tell slave its cascade identity
     outb(0x21, 0x01);
-    io_wait();
     outb(0xA1, 0x01);
-    io_wait();
 
-    // Restore original masks
-    outb(0x21, a1);
-    outb(0xA1, a2);
+    // mask all IRQs except keyboard (IRQ1 on master).
+    //
+    // PIC mask bits: 1 = masked (disabled), 0 = unmasked (enabled)
+    // master PIC IRQs: bit 0 = IRQ0 (timer), bit 1 = IRQ1 (keyboard), et cetera.
+    //
+    // 0xFD = 1111 1101b:
+    // -- bit 1 = 0  --> IRQ1 enabled
+    // -- all others = 1 --> disabled
 
-    // Now unmask keyboard IRQ (IRQ1 on master PIC)
-    uint8_t mask1 = inb(0x21);
-    mask1 &= ~0x02;      // clear bit 1 → enable IRQ1
-    outb(0x21, mask1);
+    outb(0x21, 0xFD);  // master IRQ1
+    outb(0xA1, 0xFF);  // slave
 }
 
 void idt_init() 
