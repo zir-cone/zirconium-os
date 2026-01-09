@@ -14,3 +14,33 @@ DEFINE FUNCTION sum(nums->list) >> int {
 }
 
 SAY(sum([1,2,3,4]));
+
+DEFINE CLASS BankAccount {
+    INIT(self, balance->float, interest->float) { ;;; reserved methods always return a Null and do not need to be DEFINEd.
+        LET self.balance->float  = balance;
+        LET self.interest->float = interest;
+    }
+    PRIVATE {
+        SET self.balance = 100.0;
+    }
+    PUBLIC {
+        DEFINE FUNCTION deposit(amount->float) >> Null {
+            IF (amount > 0.0) { balance += amount; } ;;; inline if statements look like IF (condition) { do this }
+            ;;; standard practice is to write int values as floats when the compared value is a float, but 0.0 can be written as 0 as CL
+            ;;; supports type coercion. this is just a standard practice.
+        }
+
+        DEFINE FUNCTION withdraw(amount->float) >> Null {
+            IF (balance <= 0.0) { return; }
+            IF (amount > 0.0) { balance -= amount; }
+        }
+
+        DEFINE FUNCTION get_balance() >> str {
+            return $F"Current balance: &balance."; ;;; &<var> in a $F string is variable interpolation.
+            ;;; whereas, &{<expr>} in a $F string is expression interpolation. Normal $-strings enable 
+            ;;; escapes, such as: return $"Hello, world!\n". Non $ strings will print the raw string:
+            ;;; return "Hello, world!\n" expected output is "Hello, world!\n", not "Hello, world!
+            ;;;                                                                                    "
+        }
+    }
+}

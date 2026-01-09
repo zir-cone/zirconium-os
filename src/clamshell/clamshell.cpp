@@ -1,8 +1,8 @@
 // src/clamshell/clamshell.cpp
 #include "clamshell.h"
-#include "fourty/ffs.h"
-#include "console.h"
-#include "ports.h"
+#include "../fourty/ffs.h"
+#include "../console.h"
+#include "../ports.h"
 #include <stdint.h>
 #include <stddef.h>
 
