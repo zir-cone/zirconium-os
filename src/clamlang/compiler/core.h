@@ -145,6 +145,8 @@ typedef struct {
     TypeTag tag;              // if typed
 } TypeSpec;
 
+typedef struct Expr Expr;
+
 typedef enum { TGT_NAME=1, TGT_INDEX=2 } TargetKind;
 
 typedef struct {
@@ -155,8 +157,6 @@ typedef struct {
         struct { char* base_name; Expr* index; } index; // base must be var
     } as;
 } Target;
-
-typedef enum { ASGN_EQ=0, ASGN_ADD, ASGN_SUB, ASGN_MUL, ASGN_DIV } AssignOp;
 
 /* ================= AST ================= */
 

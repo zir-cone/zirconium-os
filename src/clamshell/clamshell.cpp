@@ -19,7 +19,7 @@ static size_t k_strlen(const char* s) {
     return n;
 }
 
-static int k_stricmp(const char* a, const char* b) {
+static int k_strcmp(const char* a, const char* b) {
     // case-insensitive compare
     while (*a && *b) {
         char ca = *a;
@@ -33,7 +33,7 @@ static int k_stricmp(const char* a, const char* b) {
 }
 
 static bool k_streq_nocase(const char* a, const char* b) {
-    return k_stricmp(a, b) == 0;
+    return k_strcmp(a, b) == 0;
 }
 
 static void k_strcpy(char* dst, const char* src) {
@@ -398,6 +398,40 @@ static bool ends_with(const char* s, const char* suffix) {
         if (s[sl - su + i] != suffix[i]) return false;
     }
     return true;
+}
+
+static bool run_clamlang_program(const char* args, const char* label) {
+    while (*args == ' ' || *args == '\t') ++args;
+    if (*args == 0) {
+        print("Error: ");
+        print(label);
+        println(" requires a path");
+        return false;
+    }
+
+    char resolved[256];
+    if (!resolve_path(args, resolved, sizeof(resolved))) {
+        println("Error: path too long");
+        return false;
+    }
+
+    if (!clamlang_run_file(resolved)) {
+        print("Error: ");
+        print(label);
+        println(" run failed");
+        return false;
+    }
+    return true;
+}
+
+static bool run_program_path(const char* path, const char* args, const char* label) {
+    if (k_strcmp(path, "/bin/clamlang/clamlang") == 0) {
+        return run_clamlang_program(args, label ? label : "CLAMLANG");
+    }
+    if (k_strcmp(path, "/bin/clamlang/ccl") == 0) {
+        return run_clamlang_program(args, label ? label : "CCL");
+    }
+    return false;
 }
 
 static bool find_in_path(const char* cmd, char* out, size_t out_cap) {
@@ -877,21 +911,7 @@ static void handle_SET(const char* args) {
 // ------------ RUN ------------
 
 static void handle_RUN(const char* args) {
-    while (*args == ' ' || *args == '\t') ++args;
-    if (*args == 0) {
-        println("Error: RUN requires a path");
-        return;
-    }
-
-    char resolved[256];
-    if (!resolve_path(args, resolved, sizeof(resolved))) {
-        println("Error: path too long");
-        return;
-    }
-
-    if (!clamlang_run_file(resolved)) {
-        println("Error: ClamLang run failed");
-    }
+    run_program_path("/bin/clamlang/clamlang", args, "RUN");
 }
 
 // ------------ HELP ------------
@@ -945,8 +965,10 @@ static void execute_line(const char* line) {
         handle_SET(args);
     } else if (k_streq_nocase(cmd, "RUN")) {
         handle_RUN(args);
-    } else if (k_streq_nocase(cmd, "CLAMLANG") || k_streq_nocase(cmd, "CCL")) {
-        handle_RUN(args);
+    } else if (k_streq_nocase(cmd, "CLAMLANG")) {
+        run_program_path("/bin/clamlang/clamlang", args, NULL);
+    } else if (k_streq_nocase(cmd, "CCL")) {
+        run_program_path("/bin/clamlang/ccl", args, NULL);
     } else if (k_streq_nocase(cmd, "LDIR")) {
         handle_LDIR(args);
     } else if (k_streq_nocase(cmd, "CDIR")) {
@@ -965,11 +987,18 @@ static void execute_line(const char* line) {
         char resolved[256];
         bool ran = false;
         if (has_path_sep(cmd)) {
-            if (resolve_path(cmd, resolved, sizeof(resolved)) && clamlang_run_file(resolved)) {
-                ran = true;
-            }
+            if (resolve_path(cmd, resolved, sizeof(resolved))) {
+                if (run_program_path(resolved, args, NULL)) {
+                    ran = true;
+                } else if (ends_with(resolved, ".clam")) {
+                    ran = run_clamlang_program(resolved, "CLAMLANG");
+                }
         } else if (find_in_path(cmd, resolved, sizeof(resolved))) {
-            if (clamlang_run_file(resolved)) ran = true;
+            if (run_program_path(resolved, args, NULL)) {
+                ran = true;
+            } else if (ends_with(resolved, ".clam")) {
+                ran = run_clamlang_program(resolved, "CLAMLANG");
+            }
         }
 
         if (!ran) {
@@ -997,8 +1026,8 @@ void init() {
     if (g_ffs_ready) {
         ensure_dir("/bin");
         ensure_dir("/bin/clamlang");
-        ensure_file("/bin/clamlang/clamlang", "ClamLang runner (built into OS). Use: CLAMLANG <file>\n");
-        ensure_file("/bin/clamlang/ccl", "ClamLang compiler (built into OS). Use: CCL <file>\n");
+        ensure_file("/bin/clamlang/clamlang", "ClamLang runner (builtin userland). Use: CLAMLANG <file>\n");
+        ensure_file("/bin/clamlang/ccl", "ClamLang compiler (builtin userland). Use: CCL <file>\n");
         ensure_dir("/Users");
         ensure_dir("/Users/default");
         ensure_file("/Users/default/.clamrc", "PATH=/bin:/bin/clamlang\n");
