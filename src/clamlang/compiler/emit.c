@@ -1,6 +1,6 @@
 #include "core.h"
 
-/* ===== Bytecode helpers ===== */
+// --------------------- Bc helpers ---------------------
 
 static void bc_emit_u8(Chunk* c, uint8_t b){
     if (c->len+1 > c->cap) { c->cap = (c->cap==0)? 256 : c->cap*2; c->code = (uint8_t*)xrealloc(c->code, c->cap); }
@@ -22,7 +22,7 @@ static void bc_patch_i32(Chunk* c, size_t at, int32_t value){
     for (int i=0;i<4;i++) c->code[at+i] = (uint8_t)((uint32_t)value >> (8*i));
 }
 
-/* ===== String pool ===== */
+// --------------------- Str pool ---------------------
 
 static uint16_t intern_string(Bytecode* bc, const char* s) {
     for (size_t i=0;i<bc->str_count;i++) {
@@ -36,7 +36,7 @@ static uint16_t intern_string(Bytecode* bc, const char* s) {
     return (uint16_t)bc->str_count++;
 }
 
-/* ===== Name map (per chunk) ===== */
+// --------------------- name map per chubk ---------------------
 
 static void map_put(Chunk* c, const char* name, uint16_t slot) {
     for (size_t i=0;i<c->nmap;i++) {
@@ -73,7 +73,7 @@ static void map_remove_ordered(Chunk* c, const char* name) {
     }
 }
 
-/* ===== Locals ===== */
+// --------------------- locals ---------------------
 
 static uint16_t add_local(Chunk* c, const char* name, TypeSpec ts) {
     if (c->nlocals+1 > c->locals_cap) {
@@ -90,7 +90,7 @@ static uint16_t add_local(Chunk* c, const char* name, TypeSpec ts) {
     return slot;
 }
 
-/* ===== Function index ===== */
+// --------------------- function index ---------------------
 
 static int find_func(const Bytecode* bc, const char* name) {
     for (size_t i=0;i<bc->func_count;i++) {
@@ -99,7 +99,7 @@ static int find_func(const Bytecode* bc, const char* name) {
     return -1;
 }
 
-/* ===== Emit context: scopes + loop SLET hoist ===== */
+// --------------------- emit context ---------------------
 
 typedef struct {
     // scope stack: each scope tracks declared names

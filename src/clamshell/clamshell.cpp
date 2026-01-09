@@ -3,6 +3,7 @@
 #include "../fourty/ffs.h"
 #include "../console.h"
 #include "../ports.h"
+#include "../clamlang/compiler/clamlang.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -50,6 +51,7 @@ namespace clamshell {
 static uint32_t g_cwd_inode = 0;
 static char     g_cwd_path[256] = "/";
 static bool     g_ffs_ready = false;
+static char     g_path[256] = "/bin:/bin/clamlang";
 
 static const char* HOME_PATH = "/Users/default";
 
@@ -251,6 +253,93 @@ static bool resolve_path(const char* input, char* out, size_t out_cap) {
     return true;
 }
 
+static bool read_file_to_buffer(const char* path, char* buf, size_t buf_cap, size_t* out_len) {
+    if (!g_ffs_ready || !path || !buf || buf_cap == 0) return false;
+    uint32_t inode = ffs::lookup_path(path);
+    if (inode == 0) return false;
+    uint64_t size = ffs::file_size(inode);
+    if (size + 1 > buf_cap) return false;
+    int read = ffs::read_file(inode, 0, buf, (uint32_t)size);
+    if (read < 0) return false;
+    buf[read] = 0;
+    if (out_len) *out_len = (size_t)read;
+    return true;
+}
+
+static void ensure_dir(const char* path) {
+    if (!g_ffs_ready || !path) return;
+    if (ffs::lookup_path(path) == 0) {
+        ffs::create_dir(path);
+    }
+}
+
+static void ensure_file(const char* path, const char* contents) {
+    if (!g_ffs_ready || !path) return;
+    if (ffs::lookup_path(path) != 0) return;
+    if (!ffs::create_file(path)) return;
+    uint32_t inode = ffs::lookup_path(path);
+    if (inode == 0) return;
+    if (contents) {
+        size_t len = k_strlen(contents);
+        ffs::write_file(inode, 0, contents, (uint32_t)len);
+    }
+}
+
+static void set_path(const char* value) {
+    if (!value) return;
+    size_t len = k_strlen(value);
+    if (len + 1 > sizeof(g_path)) return;
+    for (size_t i = 0; i <= len; ++i) g_path[i] = value[i];
+}
+
+static void load_rc() {
+    char rc_path[256];
+    if (!resolve_path("~/.clamrc", rc_path, sizeof(rc_path))) return;
+
+    char buf[256];
+    size_t len = 0;
+    if (!read_file_to_buffer(rc_path, buf, sizeof(buf), &len)) return;
+
+    size_t i = 0;
+    while (i < len) {
+        while (i < len && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r')) ++i;
+        if (i >= len) break;
+        if (buf[i] == '#' || buf[i] == '\n') {
+            while (i < len && buf[i] != '\n') ++i;
+            if (i < len) ++i;
+            continue;
+        }
+        size_t key_start = i;
+        while (i < len && buf[i] != '=' && buf[i] != '\n') ++i;
+        if (i >= len || buf[i] != '=') {
+            while (i < len && buf[i] != '\n') ++i;
+            if (i < len) ++i;
+            continue;
+        }
+        size_t key_end = i;
+        ++i; // skip '='
+        size_t val_start = i;
+        while (i < len && buf[i] != '\n') ++i;
+        size_t val_end = i;
+        if (i < len) ++i;
+
+        size_t key_len = key_end - key_start;
+        if (key_len == 4 &&
+            (buf[key_start] == 'P' || buf[key_start] == 'p') &&
+            (buf[key_start + 1] == 'A' || buf[key_start + 1] == 'a') &&
+            (buf[key_start + 2] == 'T' || buf[key_start + 2] == 't') &&
+            (buf[key_start + 3] == 'H' || buf[key_start + 3] == 'h')) {
+            size_t value_len = val_end - val_start;
+            if (value_len + 1 < sizeof(g_path)) {
+                for (size_t j = 0; j < value_len; ++j) {
+                    g_path[j] = buf[val_start + j];
+                }
+                g_path[value_len] = 0;
+            }
+        }
+    }
+}
+
 // dummy callback used for dir check
 static void noop_dir_callback(const FFS_DirEntry&) {}
 
@@ -291,6 +380,73 @@ static bool read_file_to_console(const char* path) {
     }
     println("");
     return true;
+}
+
+static bool has_path_sep(const char* s) {
+    while (*s) {
+        if (*s == '/' || *s == '\\' || *s == ':') return true;
+        ++s;
+    }
+    return false;
+}
+
+static bool ends_with(const char* s, const char* suffix) {
+    size_t sl = k_strlen(s);
+    size_t su = k_strlen(suffix);
+    if (su > sl) return false;
+    for (size_t i = 0; i < su; ++i) {
+        if (s[sl - su + i] != suffix[i]) return false;
+    }
+    return true;
+}
+
+static bool find_in_path(const char* cmd, char* out, size_t out_cap) {
+    if (!cmd || !*cmd) return false;
+    const char* p = g_path;
+    while (*p) {
+        char dir[128];
+        size_t d = 0;
+        while (*p && *p != ':' && d + 1 < sizeof(dir)) {
+            dir[d++] = *p++;
+        }
+        dir[d] = 0;
+        if (*p == ':') ++p;
+        if (d == 0) continue;
+
+        char candidate[256];
+        size_t need = d + 1 + k_strlen(cmd) + 1;
+        if (need > sizeof(candidate)) continue;
+        size_t pos = 0;
+        for (size_t i = 0; i < d; ++i) candidate[pos++] = dir[i];
+        if (candidate[pos - 1] != '/') candidate[pos++] = '/';
+        for (size_t i = 0; cmd[i]; ++i) candidate[pos++] = cmd[i];
+        candidate[pos] = 0;
+
+        if (ffs::lookup_path(candidate) != 0) {
+            if (k_strlen(candidate) + 1 <= out_cap) {
+                k_strcpy(out, candidate);
+                return true;
+            }
+        }
+
+        if (!ends_with(cmd, ".clam")) {
+            if (pos + 5 < sizeof(candidate)) {
+                candidate[pos++] = '.';
+                candidate[pos++] = 'c';
+                candidate[pos++] = 'l';
+                candidate[pos++] = 'a';
+                candidate[pos++] = 'm';
+                candidate[pos] = 0;
+                if (ffs::lookup_path(candidate) != 0) {
+                    if (k_strlen(candidate) + 1 <= out_cap) {
+                        k_strcpy(out, candidate);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 // ------------ SAY command ------------
@@ -680,6 +836,64 @@ static void handle_CONCAT(const char* args) {
     }
 }
 
+// ------------ PATH ------------
+
+static void handle_PATH(const char* args) {
+    (void)args;
+    println(g_path);
+}
+
+// ------------ SET ------------
+
+static void handle_SET(const char* args) {
+    while (*args == ' ' || *args == '\t') ++args;
+    if (*args == 0) {
+        println("Error: SET expects KEY=VALUE");
+        return;
+    }
+
+    const char* eq = args;
+    while (*eq && *eq != '=') ++eq;
+    if (*eq != '=') {
+        println("Error: SET expects KEY=VALUE");
+        return;
+    }
+
+    size_t key_len = (size_t)(eq - args);
+    if (key_len == 4 &&
+        (args[0] == 'P' || args[0] == 'p') &&
+        (args[1] == 'A' || args[1] == 'a') &&
+        (args[2] == 'T' || args[2] == 't') &&
+        (args[3] == 'H' || args[3] == 'h')) {
+        const char* value = eq + 1;
+        set_path(value);
+        println("PATH updated.");
+        return;
+    }
+
+    println("Error: only PATH can be set right now.");
+}
+
+// ------------ RUN ------------
+
+static void handle_RUN(const char* args) {
+    while (*args == ' ' || *args == '\t') ++args;
+    if (*args == 0) {
+        println("Error: RUN requires a path");
+        return;
+    }
+
+    char resolved[256];
+    if (!resolve_path(args, resolved, sizeof(resolved))) {
+        println("Error: path too long");
+        return;
+    }
+
+    if (!clamlang_run_file(resolved)) {
+        println("Error: ClamLang run failed");
+    }
+}
+
 // ------------ HELP ------------
 
 static void cmd_help() {
@@ -688,6 +902,11 @@ static void cmd_help() {
     println("  SAY <text>");
     println("  SAY --wd");
     println("  SAY --whats-inside <path>");
+    println("  PATH");
+    println("  SET PATH=<paths>");
+    println("  RUN <file>");
+    println("  CLAMLANG <file>");
+    println("  CCL <file>");
     println("  LDIR [path]");
     println("  CDIR <path>");
     println("  MAKE <file|dir/>");
@@ -720,6 +939,14 @@ static void execute_line(const char* line) {
         cmd_help();
     } else if (k_streq_nocase(cmd, "SAY")) {
         handle_SAY(args);
+    } else if (k_streq_nocase(cmd, "PATH")) {
+        handle_PATH(args);
+    } else if (k_streq_nocase(cmd, "SET")) {
+        handle_SET(args);
+    } else if (k_streq_nocase(cmd, "RUN")) {
+        handle_RUN(args);
+    } else if (k_streq_nocase(cmd, "CLAMLANG") || k_streq_nocase(cmd, "CCL")) {
+        handle_RUN(args);
     } else if (k_streq_nocase(cmd, "LDIR")) {
         handle_LDIR(args);
     } else if (k_streq_nocase(cmd, "CDIR")) {
@@ -735,8 +962,20 @@ static void execute_line(const char* line) {
     } else if (k_streq_nocase(cmd, "CONCAT")) {
         handle_CONCAT(args);
     } else {
-        print("Unknown command: ");
-        println(cmd);
+        char resolved[256];
+        bool ran = false;
+        if (has_path_sep(cmd)) {
+            if (resolve_path(cmd, resolved, sizeof(resolved)) && clamlang_run_file(resolved)) {
+                ran = true;
+            }
+        } else if (find_in_path(cmd, resolved, sizeof(resolved))) {
+            if (clamlang_run_file(resolved)) ran = true;
+        }
+
+        if (!ran) {
+            print("Unknown command: ");
+            println(cmd);
+        }
     }
 }
 
@@ -753,6 +992,17 @@ void init() {
         println("Warning: FFS root inode is 0; filesystem not ready.");
     } else {
         g_ffs_ready = true;
+    }
+
+    if (g_ffs_ready) {
+        ensure_dir("/bin");
+        ensure_dir("/bin/clamlang");
+        ensure_file("/bin/clamlang/clamlang", "ClamLang runner (built into OS). Use: CLAMLANG <file>\n");
+        ensure_file("/bin/clamlang/ccl", "ClamLang compiler (built into OS). Use: CCL <file>\n");
+        ensure_dir("/Users");
+        ensure_dir("/Users/default");
+        ensure_file("/Users/default/.clamrc", "PATH=/bin:/bin/clamlang\n");
+        load_rc();
     }
 }
 

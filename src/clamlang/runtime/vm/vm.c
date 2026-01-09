@@ -1,4 +1,4 @@
-#include "core.h"
+#include "../../compiler/core.h"
 
 /* ===== GC ===== */
 

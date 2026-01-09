@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ================= Diagnostics ================= */
 
 typedef struct {
@@ -471,4 +475,26 @@ typedef struct {
     size_t next_gc;
 } VM;
 
+// ------------- runtime error jmp ---------------
+
+typedef struct {
+    uint32_t ebx;
+    uint32_t esi;
+    uint32_t edi;
+    uint32_t ebp;
+    uint32_t esp;
+    uint32_t eip;
+} CCL_JmpBuf;
+
+int ccl_setjmp(CCL_JmpBuf* env);
+void ccl_longjmp(CCL_JmpBuf* env, int value);
+void ccl_set_abort_env(CCL_JmpBuf* env);
+void ccl_clear_abort_env();
+
+int ccl_run_source(const char* source, size_t len, const char* file_label);
+
 void vm_run_module(VM* vm);
+
+#ifdef __cplusplus
+}
+#endif
