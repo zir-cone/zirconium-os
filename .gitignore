@@ -3,3 +3,5 @@ iso/*
 *.o
 *.elf
 *.iso
+.vscode/
+.vscode/*.json
