@@ -1,6 +1,6 @@
 #include "core.h"
 
-/* ===== Bytecode helpers ===== */
+// --------------------- Bc helpers ---------------------
 
 static void bc_emit_u8(Chunk* c, uint8_t b){
     if (c->len+1 > c->cap) { c->cap = (c->cap==0)? 256 : c->cap*2; c->code = (uint8_t*)xrealloc(c->code, c->cap); }
@@ -22,7 +22,7 @@ static void bc_patch_i32(Chunk* c, size_t at, int32_t value){
     for (int i=0;i<4;i++) c->code[at+i] = (uint8_t)((uint32_t)value >> (8*i));
 }
 
-/* ===== String pool ===== */
+// --------------------- Str pool ---------------------
 
 static uint16_t intern_string(Bytecode* bc, const char* s) {
     for (size_t i=0;i<bc->str_count;i++) {
@@ -36,7 +36,7 @@ static uint16_t intern_string(Bytecode* bc, const char* s) {
     return (uint16_t)bc->str_count++;
 }
 
-/* ===== Name map (per chunk) ===== */
+// --------------------- name map per chubk ---------------------
 
 static void map_put(Chunk* c, const char* name, uint16_t slot) {
     for (size_t i=0;i<c->nmap;i++) {
@@ -73,7 +73,7 @@ static void map_remove_ordered(Chunk* c, const char* name) {
     }
 }
 
-/* ===== Locals ===== */
+// --------------------- locals ---------------------
 
 static uint16_t add_local(Chunk* c, const char* name, TypeSpec ts) {
     if (c->nlocals+1 > c->locals_cap) {
@@ -90,7 +90,7 @@ static uint16_t add_local(Chunk* c, const char* name, TypeSpec ts) {
     return slot;
 }
 
-/* ===== Function index ===== */
+// --------------------- function index ---------------------
 
 static int find_func(const Bytecode* bc, const char* name) {
     for (size_t i=0;i<bc->func_count;i++) {
@@ -99,7 +99,7 @@ static int find_func(const Bytecode* bc, const char* name) {
     return -1;
 }
 
-/* ===== Emit context: scopes + loop SLET hoist ===== */
+// --------------------- emit context ---------------------
 
 typedef struct {
     // scope stack: each scope tracks declared names
@@ -218,9 +218,8 @@ static bool is_builtin_name(const char* name, BuiltinId* out) {
     return false;
 }
 
-typedef enum { ASGN_EQ=0, ASGN_ADD, ASGN_SUB, ASGN_MUL, ASGN_DIV } AssignOp;
-
 static void emit_assign_math(Bytecode* bc, Chunk* c, EmitCtx* ec, uint16_t slot, const Expr* rhs, AssignOp opkind) {
+    (void)ec;
     // Load current value of target
     bc_emit_u8(c, OP_GET_LOCAL);
     bc_emit_u16(c, slot);
@@ -230,10 +229,11 @@ static void emit_assign_math(Bytecode* bc, Chunk* c, EmitCtx* ec, uint16_t slot,
 
     // apply operator
     switch (opkind) {
-        case ASGN_ADD: bc_emit_u8(c, OP_ADD); break;
-        case ASGN_SUB: bc_emit_u8(c, OP_SUB); break;
-        case ASGN_MUL: bc_emit_u8(c, OP_MUL); break;
-        case ASGN_DIV: bc_emit_u8(c, OP_DIV); break;
+        case ASG_ADD: bc_emit_u8(c, OP_ADD); break;
+        case ASG_SUB: bc_emit_u8(c, OP_SUB); break;
+        case ASG_MUL: bc_emit_u8(c, OP_MUL); break;
+        case ASG_DIV: bc_emit_u8(c, OP_DIV); break;
+        case ASG_MOD: bc_emit_u8(c, OP_MOD); break;
         default:
             fprintf(stderr, "internal: bad AssignOp\n");
             exit(1);
@@ -464,13 +464,7 @@ static void emit_stmt(Bytecode* bc, Chunk* c, EmitCtx* ec, const Stmt* st) {
                     break;
                 }
 
-                // x<op>= rhs => x = x <op> rhs
-                bc_emit_u8(c, OP_GET_LOCAL);
-                bc_emit_u16(c, slot);
-                emit_expr(bc, c, ec, st->as.set_stmt.rhs);
-                emit_assign_math(bc, c, ec, slot, rhs_expr, opkind);
-                bc_emit_u8(c, OP_SET_LOCAL);
-                bc_emit_u16(c, slot);
+                emit_assign_math(bc, c, ec, slot, st->as.set_stmt.rhs, op);
                 break;
             }
 
@@ -489,12 +483,12 @@ static void emit_stmt(Bytecode* bc, Chunk* c, EmitCtx* ec, const Stmt* st) {
                     break;
                 }
 
-                // base[idx] <op>= rhs:
+                bc_emit_u8(c, OP_GET_LOCAL); bc_emit_u16(c, base_slot);
+                emit_expr(bc, c, ec, tgt.as.index.index);
                 bc_emit_u8(c, OP_GET_LOCAL); bc_emit_u16(c, base_slot);
                 emit_expr(bc, c, ec, tgt.as.index.index);
                 bc_emit_u8(c, OP_INDEX_GET);
 
-                // compute new = old <op> rhs
                 emit_expr(bc, c, ec, st->as.set_stmt.rhs);
                 switch (op) {
                     case ASG_ADD: bc_emit_u8(c, OP_ADD); break;
@@ -504,22 +498,7 @@ static void emit_stmt(Bytecode* bc, Chunk* c, EmitCtx* ec, const Stmt* st) {
                     case ASG_MOD: bc_emit_u8(c, OP_MOD); break;
                     default: fprintf(stderr, "internal: bad assign op\n"); exit(1);
                 }
-
-                // set base[idx] = new  (emit base, idx, new in order)
-                bc_emit_u8(c, OP_GET_LOCAL); bc_emit_u16(c, base_slot);
-                emit_expr(bc, c, ec, tgt.as.index.index);
-                bc_emit_u8(c, OP_GET_LOCAL); bc_emit_u16(c, base_slot);
-                emit_expr(bc, c, ec, tgt.as.index.index);
-                bc_emit_u8(c, OP_INDEX_GET);
-                emit_expr(bc, c, ec, st->as.set_stmt.rhs);
-                switch (op) {
-                    case ASG_ADD: bc_emit_u8(c, OP_ADD); break;
-                    case ASG_SUB: bc_emit_u8(c, OP_SUB); break;
-                    case ASG_MUL: bc_emit_u8(c, OP_MUL); break;
-                    case ASG_DIV: bc_emit_u8(c, OP_DIV); break;
-                    case ASG_MOD: bc_emit_u8(c, OP_MOD); break;
-                    default: fprintf(stderr, "internal: bad assign op\n"); exit(1);
-                }
+                
                 bc_emit_u8(c, OP_INDEX_SET);
                 break;
             }
