@@ -3,6 +3,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#ifdef __cplusplus
+#include <cstdlib>
+#else
+#include <stdlib.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,13 +29,21 @@ static void die_at(const Source* S, int line, int col, const char* kind, const c
 }
 
 static void* xmalloc(size_t n) {
+#ifdef __cplusplus
+    void* p = std::malloc(n);
+#else
     void* p = malloc(n);
+#endif
     if (!p) { fprintf(stderr, "fatal: out of memory\n"); exit(1); }
     return p;
 }
 
 static void* xrealloc(void* p, size_t n) {
+#ifdef __cplusplus
+    void* q = std::realloc(p, n);
+#else
     void* q = realloc(p, n);
+#endif
     if (!q) { fprintf(stderr, "fatal: out of memory\n"); exit(1); }
     return q;
 }
@@ -205,7 +218,6 @@ typedef enum {
     ST_WHILE,
     ST_FOR,
     ST_EXPR,
-    ST_INCDEC
 } StmtKind;
 
 typedef enum {
@@ -217,25 +229,6 @@ typedef enum {
     ASG_MOD     // %=
     // ASG_FLOORDIV, // //=
 } AssignOp;
-
-typedef enum {
-    TGT_NAME = 1,
-    TGT_INDEX 
-} TargetKind;
-
-typedef struct {
-    TargetKind kind;
-    int line, col;
-    union {
-        struct {
-            char* name;
-        } name;
-        struct {
-            char* base;
-            Expr* index;
-        } index;
-    } as;
-} Target;
 
 typedef struct Stmt Stmt;
 struct Stmt {
@@ -249,7 +242,7 @@ struct Stmt {
         struct { char* name; } say_ident;                                        // SAY x;
         struct { Expr* expr; } say_expr;                                         // SAY(expr);
         struct { Expr* expr; } ret_stmt;                                         // RETURN expr;
-        // struct { Target target; bool is_inc; } incdec_stmt;                      // INC/DEC
+        struct { Target target; bool is_inc; } incdec_stmt;                      // INC/DEC
 
         struct {
             Expr* cond;

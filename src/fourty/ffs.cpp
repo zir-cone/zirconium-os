@@ -440,7 +440,48 @@ static bool ensure_cluster_index(FFS_Inode* ino, uint64_t index, uint64_t* clust
     return true;
 }
 
-namespace ffs {
+namespace zircon_ffs {
+
+static void ensure_dir(const char* path) {
+    if (!path) return;
+    if (ffs::lookup_path(path) != 0) return;
+    ffs::create_dir(path);
+}
+
+static void ensure_default_layout() {
+    ensure_dir("/sys");
+    ensure_dir("/sys/modules");
+    ensure_dir("/sys/modules/devices");
+    ensure_dir("/sys/modules/mount");
+    ensure_dir("/sys/firmware");
+    ensure_dir("/sys/kernel");
+    ensure_dir("/sys/bin");
+    ensure_dir("/sys/ui-bin");
+    ensure_dir("/sys/sm-bin");
+    ensure_dir("/sys/sb-bin");
+    ensure_dir("/sys/sb-bin/core");
+    ensure_dir("/sys/sb-bin/core/clamlang");
+    ensure_dir("/sys/sb-bin/core/clamshell");
+    ensure_dir("/sys/sb-bin/core/clamscript");
+    ensure_dir("/sys/sb-bin/core/eden");
+
+    ensure_dir("/home");
+    ensure_dir("/home/root");
+    ensure_dir("/home/users");
+
+    ensure_dir("/env");
+    ensure_dir("/env/var");
+    ensure_dir("/env/var/usr");
+    ensure_dir("/env/var/sys");
+    ensure_dir("/env/proc");
+    ensure_dir("/env/tmp");
+
+    ensure_dir("/adam");
+    ensure_dir("/adam/store");
+    ensure_dir("/adam/var");
+    ensure_dir("/adam/tmp");
+    ensure_dir("/adam/hm");
+}
 
 bool mount() {
     uint8_t buffer[FFS_BLOCK_SIZE];
@@ -509,9 +550,14 @@ bool format() {
 
 bool init() {
     if (g_mounted) return true;
-    if (mount()) return true;
+    if (mount()) {
+        ensure_default_layout();
+        return true;
+    }
     if (!format()) return false;
-    return mount();
+    if (!mount()) return false;
+    ensure_default_layout();
+    return true;
 }
 
 uint32_t root_inode() {

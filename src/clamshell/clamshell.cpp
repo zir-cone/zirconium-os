@@ -255,11 +255,11 @@ static bool resolve_path(const char* input, char* out, size_t out_cap) {
 
 static bool read_file_to_buffer(const char* path, char* buf, size_t buf_cap, size_t* out_len) {
     if (!g_ffs_ready || !path || !buf || buf_cap == 0) return false;
-    uint32_t inode = ffs::lookup_path(path);
+    uint32_t inode = zircon_ffs::lookup_path(path);
     if (inode == 0) return false;
-    uint64_t size = ffs::file_size(inode);
+    uint64_t size = zircon_ffs::file_size(inode);
     if (size + 1 > buf_cap) return false;
-    int read = ffs::read_file(inode, 0, buf, (uint32_t)size);
+    int read = zircon_ffs::read_file(inode, 0, buf, (uint32_t)size);
     if (read < 0) return false;
     buf[read] = 0;
     if (out_len) *out_len = (size_t)read;
@@ -268,20 +268,20 @@ static bool read_file_to_buffer(const char* path, char* buf, size_t buf_cap, siz
 
 static void ensure_dir(const char* path) {
     if (!g_ffs_ready || !path) return;
-    if (ffs::lookup_path(path) == 0) {
-        ffs::create_dir(path);
+    if (zircon_ffs::lookup_path(path) == 0) {
+        zircon_ffs::create_dir(path);
     }
 }
 
 static void ensure_file(const char* path, const char* contents) {
     if (!g_ffs_ready || !path) return;
-    if (ffs::lookup_path(path) != 0) return;
-    if (!ffs::create_file(path)) return;
-    uint32_t inode = ffs::lookup_path(path);
+    if (zircon_ffs::lookup_path(path) != 0) return;
+    if (!zircon_ffs::create_file(path)) return;
+    uint32_t inode = zircon_ffs::lookup_path(path);
     if (inode == 0) return;
     if (contents) {
         size_t len = k_strlen(contents);
-        ffs::write_file(inode, 0, contents, (uint32_t)len);
+        zircon_ffs::write_file(inode, 0, contents, (uint32_t)len);
     }
 }
 
@@ -344,12 +344,12 @@ static void load_rc() {
 static void noop_dir_callback(const FFS_DirEntry&) {}
 
 static bool is_dir_inode(uint32_t inode) {
-    return ffs::list_dir(inode, noop_dir_callback);
+    return zircon_ffs::list_dir(inode, noop_dir_callback);
 }
 
 static bool read_file_to_console(const char* path) {
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: zircon_ffs not ready");
         return false;
     }
 
@@ -359,7 +359,7 @@ static bool read_file_to_console(const char* path) {
         return false;
     }
 
-    uint32_t inode = ffs::lookup_path(resolved);
+    uint32_t inode = zircon_ffs::lookup_path(resolved);
     if (inode == 0) {
         println("Error: file not found");
         return false;
@@ -368,7 +368,7 @@ static bool read_file_to_console(const char* path) {
     char buf[256];
     uint64_t offset = 0;
     while (true) {
-        int n = ffs::read_file(inode, offset, buf, sizeof(buf) - 1);
+        int n = zircon_ffs::read_file(inode, offset, buf, sizeof(buf) - 1);
         if (n <= 0) break;
         buf[n] = 0;
         print(buf);
@@ -456,7 +456,7 @@ static bool find_in_path(const char* cmd, char* out, size_t out_cap) {
         for (size_t i = 0; cmd[i]; ++i) candidate[pos++] = cmd[i];
         candidate[pos] = 0;
 
-        if (ffs::lookup_path(candidate) != 0) {
+        if (zircon_ffs::lookup_path(candidate) != 0) {
             if (k_strlen(candidate) + 1 <= out_cap) {
                 k_strcpy(out, candidate);
                 return true;
@@ -471,7 +471,7 @@ static bool find_in_path(const char* cmd, char* out, size_t out_cap) {
                 candidate[pos++] = 'a';
                 candidate[pos++] = 'm';
                 candidate[pos] = 0;
-                if (ffs::lookup_path(candidate) != 0) {
+                if (zircon_ffs::lookup_path(candidate) != 0) {
                     if (k_strlen(candidate) + 1 <= out_cap) {
                         k_strcpy(out, candidate);
                         return true;
@@ -567,7 +567,7 @@ static void handle_LDIR(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
 
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: ffs not ready");
         return;
     }
 
@@ -579,7 +579,7 @@ static void handle_LDIR(const char* args) {
             println("Error: path too long");
             return;
         }
-        inode = ffs::lookup_path(resolved);
+        inode = zircon_ffs::lookup_path(resolved);
         if (inode == 0) {
             println("Error: directory not found");
             return;
@@ -601,7 +601,7 @@ static void handle_LDIR(const char* args) {
         console_write("\n");
     };
 
-    if (!ffs::list_dir(inode, cb)) {
+    if (!zircon_ffs::list_dir(inode, cb)) {
         println("Error: not a directory");
     }
 }
@@ -612,7 +612,7 @@ static void handle_CDIR(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
 
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: ffs not ready");
         return;
     }
 
@@ -626,7 +626,7 @@ static void handle_CDIR(const char* args) {
         println("Error: path too long");
         return;
     }
-    uint32_t inode = ffs::lookup_path(resolved);
+    uint32_t inode = zircon_ffs::lookup_path(resolved);
     if (inode == 0) {
         println("Error: directory not found");
         return;
@@ -649,7 +649,7 @@ static void handle_CDIR(const char* args) {
 static void handle_MAKE(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: ffs not ready");
         return;
     }
     if (*args == 0) {
@@ -667,8 +667,8 @@ static void handle_MAKE(const char* args) {
     bool is_dir = (len > 0 && resolved[len - 1] == '/');
 
     bool ok = false;
-    if (is_dir) ok = ffs::create_dir(resolved);
-    else        ok = ffs::create_file(resolved);
+    if (is_dir) ok = zircon_ffs::create_dir(resolved);
+    else        ok = zircon_ffs::create_file(resolved);
 
     if (!ok) {
         println("Error: MAKE failed");
@@ -680,7 +680,7 @@ static void handle_MAKE(const char* args) {
 static void handle_REMOVE(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: ffs not ready");
         return;
     }
     if (*args == 0) {
@@ -694,7 +694,7 @@ static void handle_REMOVE(const char* args) {
         return;
     }
 
-    if (!ffs::remove_path(resolved)) {
+    if (!zircon_ffs::remove_path(resolved)) {
         println("Error: REMOVE failed");
     }
 }
@@ -716,7 +716,7 @@ static void handle_READ(const char* args) {
 static void handle_WRITE(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: ffs not ready");
         return;
     }
     if (*args == 0) {
@@ -773,13 +773,13 @@ static void handle_WRITE(const char* args) {
         return;
     }
 
-    uint32_t inode = ffs::lookup_path(resolved);
+    uint32_t inode = zircon_ffs::lookup_path(resolved);
     if (inode == 0) {
-        if (!ffs::create_file(resolved)) {
+        if (!zircon_ffs::create_file(resolved)) {
             println("Error: failed to create target file");
             return;
         }
-        inode = ffs::lookup_path(resolved);
+        inode = zircon_ffs::lookup_path(resolved);
         if (inode == 0) {
             println("Error: internal error after CREATE");
             return;
@@ -788,10 +788,10 @@ static void handle_WRITE(const char* args) {
 
     uint64_t offset = 0;
     if (append) {
-        offset = ffs::file_size(inode);
+        offset = zircon_ffs::file_size(inode);
     }
 
-    if (ffs::write_file(inode, offset, text, (uint32_t)len) < 0) {
+    if (zircon_ffs::write_file(inode, offset, text, (uint32_t)len) < 0) {
         println("Error: write failed");
     }
 }
@@ -801,7 +801,7 @@ static void handle_WRITE(const char* args) {
 static void handle_CONCAT(const char* args) {
     while (*args == ' ' || *args == '\t') ++args;
     if (!g_ffs_ready) {
-        println("Error: FFS not ready");
+        println("Error: ffs not ready");
         return;
     }
     if (*args == 0 || *args != '"') {
@@ -847,13 +847,13 @@ static void handle_CONCAT(const char* args) {
         return;
     }
 
-    uint32_t inode = ffs::lookup_path(resolved);
+    uint32_t inode = zircon_ffs::lookup_path(resolved);
     if (inode == 0) {
-        if (!ffs::create_file(resolved)) {
+        if (!zircon_ffs::create_file(resolved)) {
             println("Error: failed to create target file");
             return;
         }
-        inode = ffs::lookup_path(resolved);
+        inode = zircon_ffs::lookup_path(resolved);
         if (inode == 0) {
             println("Error: internal error after CREATE");
             return;
@@ -862,10 +862,10 @@ static void handle_CONCAT(const char* args) {
 
     uint64_t offset = 0;
     if (!overwrite) {
-        offset = ffs::file_size(inode);
+        offset = zircon_ffs::file_size(inode);
     }
 
-    if (ffs::write_file(inode, offset, text, (uint32_t)t) < 0) {
+    if (zircon_ffs::write_file(inode, offset, text, (uint32_t)t) < 0) {
         println("Error: write failed");
     }
 }
@@ -993,6 +993,7 @@ static void execute_line(const char* line) {
                 } else if (ends_with(resolved, ".clam")) {
                     ran = run_clamlang_program(resolved, "CLAMLANG");
                 }
+            }
         } else if (find_in_path(cmd, resolved, sizeof(resolved))) {
             if (run_program_path(resolved, args, NULL)) {
                 ran = true;
@@ -1011,14 +1012,14 @@ static void execute_line(const char* line) {
 // ------------ public API ------------
 
 void init() {
-    // kernel should already have called ffs::init()
+    // kernel should already have called zircon_ffs::init()
     g_cwd_path[0] = '/';
     g_cwd_path[1] = 0;
 
-    g_cwd_inode = ffs::root_inode();
+    g_cwd_inode = zircon_ffs::root_inode();
     if (g_cwd_inode == 0) {
         g_ffs_ready = false;
-        println("Warning: FFS root inode is 0; filesystem not ready.");
+        println("Warning: ffs root inode is 0; filesystem not ready.");
     } else {
         g_ffs_ready = true;
     }

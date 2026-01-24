@@ -57,8 +57,7 @@ struct __attribute__((packed)) FFS_DirEntry
 
 // Public API
 
-namespace ffs
-{
+namespace zircon_ffs {
     bool        init();
     bool        format();
     bool        mount();
