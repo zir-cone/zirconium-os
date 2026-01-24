@@ -2,7 +2,7 @@
 #include "../../console.h"
 #include "../../fourty/ffs.h"
 #include "core.h"
-#include <cstdlib>
+#include <stdlib.h>
 
 static void print_error(const char *msg) {
   console_write("ClamLang error: ");
@@ -36,13 +36,13 @@ bool clamlang_run_file(const char *path) {
 
   int read = zircon_ffs::read_file(inode, 0, buffer, (uint32_t)size);
   if (read <= 0) {
-    std::free(buffer);
+    free(buffer);
     print_error("failed to read file");
     return false;
   }
   buffer[read] = 0;
 
   int result = ccl_run_source(buffer, (size_t)read, path);
-  std::free(buffer);
+  free(buffer);
   return result == 0;
 }

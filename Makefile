@@ -2,9 +2,9 @@ CC  = gcc
 CXX = g++
 AS  = gcc
 LD  = $(CC)
-
-CFLAGS   = -m32 -ffreestanding -O2 -Wall -Wextra
-CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
+# -ffreestanding
+CFLAGS   = -m32 -O2 -Wall -Wextra
+CXXFLAGS = -std=c++11 $(CFLAGS) -fno-exceptions -fno-rtti
 LDFLAGS = -m32 -T linker.ld -nostdlib
 
 OBJS = src/boot.o src/interrupts_asm.o src/interrupts.o src/keyboard.o src/kernel.o src/fourty/block_device.o src/fourty/ffs_core.o src/fourty/ffs.o src/clamshell/clamshell.o src/clamlang/compiler/clamlang.o src/clamlang/compiler/lexer.o src/clamlang/compiler/parser.o src/clamlang/compiler/emit.o src/clamlang/runtime/vm/vm.o src/clamlang/runtime/runtime.o src/clamlang/runtime/runner.o src/console.o

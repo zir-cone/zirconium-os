@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #ifdef __cplusplus
+#include <stdlib.h>
 #include <cstdlib>
 #else
 #include <stdlib.h>
@@ -30,7 +31,7 @@ static void die_at(const Source* S, int line, int col, const char* kind, const c
 
 static void* xmalloc(size_t n) {
 #ifdef __cplusplus
-    void* p = std::malloc(n);
+    void* p = malloc(n);
 #else
     void* p = malloc(n);
 #endif
@@ -40,7 +41,7 @@ static void* xmalloc(size_t n) {
 
 static void* xrealloc(void* p, size_t n) {
 #ifdef __cplusplus
-    void* q = std::realloc(p, n);
+    void* q = realloc(p, n);
 #else
     void* q = realloc(p, n);
 #endif

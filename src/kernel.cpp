@@ -32,7 +32,7 @@ extern "C" void kernel_main() {
     console_write("Keyboard enabled.\n");
     console_write("\n> ");
 
-    if (!ffs::init()) {
+    if (!zircon_ffs::init()) {
         console_write("FFS init failed.\n");
     } else {
         console_write("FFS initialized.\n");

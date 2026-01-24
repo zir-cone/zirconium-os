@@ -534,7 +534,7 @@ static Stmt* parse_stmt(Parser* P) {
 
 		    Stmt* st = new_stmt(ST_INCDEC, tgt.line, tgt.col);
 		    st->as.incdec_stmt.target = tgt;
-		    st->as.incdec-stmt.is_inc = (op == TK_PLUSPLUS);
+		    st->as.incdec_stmt.is_inc = (op == TK_PLUSPLUS);
 		    return st;
 	   }
 	   

@@ -444,8 +444,8 @@ namespace zircon_ffs {
 
 static void ensure_dir(const char* path) {
     if (!path) return;
-    if (ffs::lookup_path(path) != 0) return;
-    ffs::create_dir(path);
+    if (zircon_ffs::lookup_path(path) != 0) return;
+    zircon_ffs::create_dir(path);
 }
 
 static void ensure_default_layout() {
