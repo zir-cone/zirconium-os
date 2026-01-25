@@ -2,8 +2,7 @@ CC  = gcc
 CXX = g++
 AS  = gcc
 LD  = $(CC)
-# -ffreestanding
-CFLAGS   = -m32 -O2 -Wall -Wextra
+CFLAGS   = -m32 -O2 -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector
 CXXFLAGS = -std=c++11 $(CFLAGS) -fno-exceptions -fno-rtti
 LDFLAGS = -m32 -T linker.ld -nostdlib
 

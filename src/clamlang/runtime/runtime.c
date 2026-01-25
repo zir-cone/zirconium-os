@@ -102,6 +102,22 @@ void* memcpy(void* dst, const void* src, size_t bytes) {
     return dst;
 }
 
+void* memmove(void* dst, const void* src, size_t bytes) {
+    uint8_t* d = (uint8_t*)dst;
+    const uint8_t* s = (const uint8_t*)src;
+    if (d == s || bytes == 0) return dst;
+    if (d < s) {
+        for (size_t i = 0; i < bytes; ++i) {
+            d[i] = s[i];
+        }
+    } else {
+        for (size_t i = bytes; i > 0; --i) {
+            d[i - 1] = s[i - 1];
+        }
+    }
+    return dst;
+}
+
 void* memset(void* dst, int value, size_t bytes) {
     uint8_t* d = (uint8_t*)dst;
     for (size_t i = 0; i < bytes; ++i) {
@@ -123,6 +139,70 @@ int strcmp(const char* a, const char* b) {
         ++b;
     }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+int strcasecmp(const char* a, const char* b) {
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return (int)(unsigned char)ca - (int)(unsigned char)cb;
+        ++a;
+        ++b;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+static int char_to_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+long long strtoll(const char* nptr, char** endptr, int base) {
+    const char* s = nptr;
+    while (s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '\f' || *s == '\v')) {
+        ++s;
+    }
+    int sign = 1;
+    if (*s == '-') {
+        sign = -1;
+        ++s;
+    } else if  (*s == '+') {
+        ++s;
+    }
+
+    if (base == 0) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            base = 16;
+            s += 2;
+        } else if (s[0] == '0') {
+            base = 8;
+            ++s;
+        } else {
+            base = 10;
+        }
+    }
+
+    long long value = 0;
+    bool any = false;
+    int digit = 0;
+    while ((digit = char_to_digit(*s)) >= 0 && digit < base) {
+        any = true;
+        value = value * base + digit;
+        ++s;
+    }
+
+    if (endptr) {
+        *endptr = (char*)(any ? s : nptr);
+    }
+    return value * sign;
+}
+
+long long __isoc23_strtoll(const char* nptr, char** endptr, int base) {
+    return strtoll(nptr, endptr, base);
 }
 
 static void write_char(char c) {
@@ -242,6 +322,127 @@ int fprintf(FILE* stream, const char* fmt, ...) {
     int count = vprint(fmt, args);
     va_end(args);
     return count;
+}
+
+int putchar(int c) {
+    write_char((char)c);
+    return c;
+}
+
+int puts(const char* s) {
+    if (!s) return -1;
+    write_str(s);
+    write_char('\n');
+    return 0;
+}
+
+size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
+    (void)stream;
+    const uint8_t* data = (const uint8_t*)ptr;
+    size_t total = size * nmemb;
+    for (size_t i = 0; i < total; ++1) {
+        write_char((char)data[i]);
+    }
+    return nmemb;
+}
+
+static int vsnprintf_internal(char* buffer, size_t size, const char* fmt, va_list args) {
+    size_t pos = 0;
+    int count = 0;
+    for (size_t i = 0; fmt && fmt[i]; ++i) {
+        if (fmt[i] != '%') {
+            if (pos + 1 < size && buffer) buffer[pos] = fmt[i];
+            ++pos;
+            ++count;
+            continue;
+        }
+        ++i;
+        if (!fmt[i]) break;
+        if (fmt[i] == '%') {
+            if (pos + 1 < size && buffer) buffer[pos] = '%';
+            ++pos;
+            ++count;
+            continue;
+        }
+        if (fmt[i] == 's') {
+            const char* s = va_arg(args, const char*);
+            if (!s) s = "(null)";
+            for (; *s; ++s) {
+                if (pos + 1 < size && buffer) buffer[pos] = *s;
+                ++pos;
+                ++count;
+            }
+            continue;
+        }
+        if (pos + 1 < size && buffer) buffer[pos] = '?';
+        ++pos;
+        ++count;
+    }
+    if (buffer && size > 0) {
+        buffer[(pos < size) ? pos : size - 1] = 0;
+    }
+    return count;
+}
+
+int snprintf(char* buffer, size_t size, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    itn count = vsnprintf_internal(buffer, size, fmt, args);
+    va_end(args);
+    return count;
+}
+
+void __stack_chk_fail_local(void) {
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+
+static uint64_t udivmod64(uint64_t n, uint64_t d, uint64_t* rem) {
+    if (d == 0) {
+        if (rem) *rem = 0;
+        return 0;
+    }
+    uint64_t q = 0;
+    uint64_t r = 0;
+    for (int i = 63; i >= 0; --1) {
+        r = (r << 1) | ((n >> i) & 1ULL);
+        if (r >= d) {
+            r -= d;
+            q |= (1ULL << i);
+        }
+    }
+    if (rem) *rem = r;
+    return q;
+}
+
+long long __divdi3(long long a, long long b) {
+    if (b == 0) return 0;
+    int sign = 1;
+    uint64_t ua = (uint64_t)a;
+    uint64_t ub = (uint64_t)b;
+    if (a < 0) {
+        ua = (uint64_t)(-a);
+        sign = -sign;
+    }
+    if (b < 0) {
+        ub = (uint64_t)(-b);
+        sign = -sign;
+    }
+    uint64_t q = udivmod64(ua, ub, NULL);
+    long long result = (long long)q;
+    retur sign < 0 ? -result : result;
+}
+
+long long __moddi3(long long a, long long b) {
+    if (b == 0) return 0;
+    int sign = (a < 0) ? -1 : 1;
+    uint64_t ua = (a < 0) ? (uint64_t)(-a) : (uint64_t)a;
+    uint64_t ub = (b < 0) ? (uint64_t)(-b) : (uint64_t)b;
+    uint64_t r = 0;
+    udivmod64(ua, ub, &r);
+    long long result = (long long)r;
+    return sign < 0 ? -result : result;
 }
 
 static CCL_JmpBuf* g_abort_env = NULL;

@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#if defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 1
 #include <stdio.h>
 #ifdef __cplusplus
 #include <stdlib.h>
@@ -9,7 +10,6 @@
 #else
 #include <stdlib.h>
 #endif
-#include <stdlib.h>
 #include <string.h>
 
 #ifndef _WIN32
@@ -20,12 +20,42 @@
 #define _stricmp strcasecmp
 #define _strtoi64 strtoll
 #endif
+#else
+typedef struct FILE {
+    int unused;
+} FILE;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+extern FILE* stderr;
+int fprintf(FILE* stream, const char* fmt, ...);
+int printf(const char* fmt, ...);
+int snprintf(char* buffer, size_t size, const char* fmt, ...);
+size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream);
+int puts(const char* s);
+int putchar(int c);
+void* malloc(size_t n);
+void* realloc(void* p, size_t n);
+void free(void* p);
+void exit(int code);
+size_t strlen(const char* s);
+int strcmp(const char* a, const char* b);
+int strcasecmp(const char* a, const char* b);
+long long strtoll(const char* nptr, char** endptr, int base);
+void* memcpy(void* dst, const void* src, size_t bytes);
+void* memmove(void* dst, const void* src, size_t bytes);
+void* memset(void* dst, int value, size_t bytes);
 
+#ifdef __cplusplus
+}
+#endif
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* ================= Diagnostics ================= */
 

@@ -2,7 +2,6 @@
 #include "../../console.h"
 #include "../../fourty/ffs.h"
 #include "core.h"
-#include <stdlib.h>
 
 static void print_error(const char *msg) {
   console_write("ClamLang error: ");
