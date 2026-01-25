@@ -1,8 +1,8 @@
 #include "core.h"
 
-static Token* peek(Parser* P){ return &P->toks[P->pos]; }
-static Token* prev(Parser* P){ return &P->toks[P->pos-1]; }
-static bool at(Parser* P, TokenKind k){ return peek(P)->kind == k; }
+static Token* peek(Parser* P) { return &P->toks[P->pos]; }
+static Token* prev(Parser* P) { return &P->toks[P->pos-1]; }
+static bool at(Parser* P, TokenKind k) { return peek(P)->kind == k; }
 
 static Token* consume(Parser* P, TokenKind k, const char* msg) {
     if (!at(P,k)) die_at(&P->S, peek(P)->line, peek(P)->col, "SyntaxError", msg);
@@ -53,7 +53,6 @@ static TypeSpec parse_typespec_opt(Parser* P) {
 
     ts.is_typed = true;
 
-    // optional "const" modifier as an identifier token (phase 1 legacy)
     if (at(P, TK_IDENT)) {
         Token* t0 = peek(P);
         char* s0 = tok_text(P, t0);
@@ -281,6 +280,8 @@ static Stmt* new_stmt(StmtKind k, int line, int col) {
 }
 
 static Stmt* parse_block(Parser* P);
+static Target parse_target(Parser* P);
+static AssignOp parse_assign_op(Parser* P);
 
 static Stmt* parse_if(Parser* P) {
     Token* ifTok = prev(P); // IF already consumed
@@ -558,7 +559,7 @@ static Target parse_target(Parser* P) {
 	Token* t = peek(P);
 	Target tgt;
 	memset(&tgt, 0, sizeof(tgt));
-	tgt.live = t->line;
+	tgt.line = t->line;
 	tgt.col = t->col;
 
 	// base must be IDENT 4 now
@@ -587,7 +588,8 @@ static AssignOp parse_assign_op(Parser* P) {
 	if (match(P, TK_SLASHEQ)) return ASG_DIV;
 	if (match(P, TK_PERCENTEQ)) return ASG_MOD;
 	die_at(&P->S, peek(P)->line, peek(P)->col, "SyntaxError", "expected assignment operator");
-
+    return ASG_EQ;
+}
 static Stmt* parse_block(Parser* P) {
     consume(P, TK_LBRACE, "expected '{'");
     Stmt* head=NULL;

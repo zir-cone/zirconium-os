@@ -12,9 +12,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <strings.h>
+#endif
+
+#ifndef _WIN32
+#define _stricmp strcasecmp
+#define _strtoi64 strtoll
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+
 
 /* ================= Diagnostics ================= */
 
