@@ -1,7 +1,2 @@
-iso/
-iso/*
-*.o
-*.elf
-*.iso
-.vscode
-.vscode/*.json
+resources/*.txt
+
