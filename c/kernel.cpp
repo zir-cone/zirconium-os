@@ -3,42 +3,72 @@
 #include <stddef.h>
 #include "interrupts.h"
 #include "keyboard.h"
-#include "fourty/ffs.h"
-#include "fourty/block_device.h"
-#include "clamshell/clamshell.h"
 #include "console.h"
+#include "kernel_module.h"
+#include "../forty-fs/ffs.h"
+#include "../clam/clamshell/clamshell.h"
 
-static const int VGA_WIDTH  = 80;
-static const int VGA_HEIGHT = 25;
-static uint16_t* const VGA_MEMORY = (uint16_t*)0xB8000;
+namespace {
+    void kernel_log(const char* message) {
+        console_write(message);
+    }
 
-static size_t terminal_row;
-static size_t terminal_column;
-static uint8_t terminal_color;
-static uint16_t* terminal_buffer;
+    bool init_interrupts() {
+        idt_init();
+        kernel_log("IDT installed.\nPIC remapped.\n");
+        return true;
+    }
 
-static inline uint16_t vga_entry(char c, uint8_t color) {
-    return ((uint16_t)color << 8) | (uint8_t)c;
+    bool init_storage() {
+        if (!ffs::init()) {
+            kernel_log("FFS initialization failed.\n");
+            return false;
+        }
+        kernel_log("FFS initialized.\n");
+        return true;
+    }
+
+    bool init_shell() {
+        clamshell::init();
+        return true;
+    }
 }
 
 extern "C" void kernel_main() {
     console_initialize();
     console_write("ZirconiumOS kernel starting...\n");
 
-    idt_init();
-    console_write("IDT installed.\nPIC remapped.\n");
+    static const kernel_module kModules[] = {
+        {
+            "interrupts",
+            1u,
+            KERNEL_MODULE_API_CONSOLE,
+            KERNEL_MODULE_API_INTERRUPTS,
+            init_interrupts,
+        },
+        {
+            "storage",
+            1u,
+            KERNEL_MODULE_API_CONSOLE | KERNEL_MODULE_API_INTERRUPTS,
+            KERNEL_MODULE_API_STORAGE,
+            init_storage,
+        },
+        {
+            "shell",
+            1u,
+            KERNEL_MOPDULE_API_CONSOLE | KERNEL_MODULE_API_STORAGE,
+            KERNEL_MODULE_API_SHELL,
+            init_shell,
+        },
+    };
 
+    uint32_t ready_mask = KERNEL_MODULE_API_CONSOLE;
+    kernel_modules_init(kModules, sizeof(kModules) / sizeof(kModules[0]), kernel_log, &ready_mask);
+    // is that.... SIX SEVEN?!?!?!?!?!?!!!?????? 😱😱😱😱🔥‼️‼️‼️🔥🔥🚨🚨🚨🔥🔥‼️‼️🗣️🗣️🗣️🧯💯💯💯🥀🥀🥀🥀🥀🥀🥀🥀
     asm volatile("sti"); // enable interrupts
     console_write("Keyboard enabled.\n");
     console_write("\n> ");
 
-    if (!ffs::init()) {
-        console_write("FFS init failed.\n");
-    } else {
-        console_write("FFS initialized.\n");
-    }
-
-    clamshell::init();
     clamshell::repl();
     char buffer[80];
     size_t len = 0;
@@ -61,10 +91,10 @@ extern "C" void kernel_main() {
 
             len = 0;
         } else if (c == '\b') {
-            if (len > -1) {
+            if (len > 0) {
                 --len;
                 console_putc('\b');
-            } // is that.... SIX SEVEN?!?!?!?!?!?!!!?????? 😱😱😱😱🔥‼️‼️‼️🔥🔥🚨🚨🚨🔥🔥‼️‼️🗣️🗣️🗣️🧯💯💯💯🥀🥀🥀🥀🥀🥀🥀🥀
+            }        
         } else {
             if (len < sizeof(buffer) - 1) {
                 buffer[len++] = c;
